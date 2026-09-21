@@ -1,0 +1,68 @@
+# MikroTik VLAN Modes App - Tkinter
+
+La aplicación permite cambiar una VLAN entre `MODE_NORMAL`, `MODE_EXAM`,
+`MODE_RESTRICTED` y `MODE_SELECTIVE`.
+
+## Versión 1.1.0
+
+- Añadido `MODE_SELECTIVE`.
+- Descubrimiento dinámico de todas las listas `ALLOW_*` disponibles en MikroTik.
+- Selección de permisos opcionales desde la interfaz Tkinter.
+- Limpieza automática de las listas `ALLOW_*` al cambiar a otro modo.
+- Refresco de las listas disponibles mediante "Actualizar estado".
+
+En `MODE_SELECTIVE`, la red se añade siempre a `MODE_SELECTIVE` y, de forma
+opcional, a las listas disponibles cuyo nombre empieza por `ALLOW_`. La
+aplicación descubre esas listas consultando `/ip/firewall/address-list`, por lo
+que una nueva lista aparecerá al pulsar "Actualizar estado" siempre que tenga
+alguna entrada. Las reglas del firewall deben interpretar esas listas como
+permisos adicionales para una red que ya pertenece a `MODE_SELECTIVE`.
+
+Las listas opcionales conocidas actualmente son `ALLOW_AI`, `ALLOW_SEARCH`,
+`ALLOW_M365`, `ALLOW_SIMARRO`, `ALLOW_ISOS`, `ALLOW_VIDEOGAME` y
+`ALLOW_FULL_INTERNET`, aunque la aplicación también admite cualquier nueva
+lista cuyo nombre empiece por `ALLOW_`.
+
+Versión sin Qt/PySide6, pensada para servidores Ubuntu antiguos donde Qt falla por CPU sin SSSE3/SSE4.
+
+## Instalar en Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip python3-tk unzip
+
+cd /opt/firewall-app
+unzip mikrotik_vlan_modes_tk_app.zip
+cd mikrotik_vlan_modes_tk_app
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Ejecutar
+
+```bash
+./modo_salo.sh
+```
+
+O manualmente:
+
+```bash
+source .venv/bin/activate
+python3 app.py --host 10.99.0.1 --port 7443 --user firewall-app --vlan 21 --network 10.0.21.0/24 --name "Saló de Actes"
+```
+
+## Requisitos en MikroTik
+
+- `www-ssl` activo en puerto 7443.
+- Reglas input permitiendo `SRC_TODAS_LAN -> 10.99.0.1:7443`.
+- Usuario con permisos suficientes para modificar `/ip firewall address-list` y limpiar `/ip firewall connection`.
+- La lista `MODE_SELECTIVE` y las listas `ALLOW_*` deben existir en las reglas del firewall con la semántica mostrada en el diagrama.
+
+## Historial de versiones
+
+### 1.1.0
+
+Primera versión con `MODE_SELECTIVE`, selección dinámica de listas `ALLOW_*`
+y sincronización de los permisos activos desde MikroTik.
