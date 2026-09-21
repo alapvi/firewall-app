@@ -3,26 +3,25 @@
 La aplicación permite cambiar una VLAN entre `MODE_NORMAL`, `MODE_EXAM`,
 `MODE_RESTRICTED` y `MODE_SELECTIVE`.
 
-## Versión 1.1.3
+## Versión 1.2.0
 
 - Añadido `MODE_SELECTIVE`.
-- Descubrimiento dinámico de todas las listas `ALLOW_*` disponibles en MikroTik.
+- Catálogo fijo de listas opcionales `ALLOW_*`, visible aunque estén vacías en MikroTik.
 - Selección de permisos opcionales desde la interfaz Tkinter.
-- Limpieza automática de las listas `ALLOW_*` al cambiar a otro modo.
-- Refresco de las listas disponibles mediante "Actualizar estado".
+- Limpieza automática de las listas `ALLOW_*` al cambiar a otro modo, incluidos los checkbox de la interfaz.
+- `MODE_NORMAL` se verifica comprobando la pertenencia a `SRC_GENERAL`.
+- Limpieza de conexiones (`conntrack`) tratada como una acción best-effort que no invalida un cambio de modo ya confirmado.
 - Instalación documentada paso a paso para Ubuntu.
 
 En `MODE_SELECTIVE`, la red se añade siempre a `MODE_SELECTIVE` y, de forma
-opcional, a las listas disponibles cuyo nombre empieza por `ALLOW_`. La
-aplicación descubre esas listas consultando `/ip/firewall/address-list`, por lo
-que una nueva lista aparecerá al pulsar "Actualizar estado" siempre que tenga
-alguna entrada. Las reglas del firewall deben interpretar esas listas como
-permisos adicionales para una red que ya pertenece a `MODE_SELECTIVE`.
+opcional, a las listas del catálogo `ALLOW_*`. Las reglas del firewall deben
+interpretar esas listas como permisos adicionales para una red que ya
+pertenece a `MODE_SELECTIVE`.
 
-Las listas opcionales conocidas actualmente son `ALLOW_AI`, `ALLOW_SEARCH`,
+Las listas opcionales soportadas son `ALLOW_AI`, `ALLOW_SEARCH`,
 `ALLOW_M365`, `ALLOW_SIMARRO`, `ALLOW_ISOS`, `ALLOW_VIDEOGAME` y
-`ALLOW_FULL_INTERNET`, aunque la aplicación también admite cualquier nueva
-lista cuyo nombre empiece por `ALLOW_`.
+`ALLOW_FULL_INTERNET`. Se declaran de forma fija en la aplicación porque
+RouterOS no representa una address-list vacía como un objeto independiente.
 
 ### Flujo de modos
 
@@ -185,6 +184,32 @@ python app.py --host 10.99.0.1 --port 7443 --user firewall-app \
 La aplicación solicitará la contraseña de MikroTik en una ventana, no desde la
 línea de comandos.
 
+### 6.1. Ejecutar desde un servidor sin escritorio
+
+La aplicación utiliza Tkinter y necesita una pantalla gráfica. Si el servidor
+se administra por SSH y `echo "$DISPLAY"` no muestra ningún valor, no se puede
+abrir la ventana directamente en esa terminal.
+
+Opciones recomendadas:
+
+- Ejecutar la aplicación en un ordenador con escritorio gráfico y conectarlo al
+	MikroTik usando la IP y el puerto configurados.
+- Usar SSH con reenvío X11 desde un equipo Linux o macOS:
+
+	```bash
+	ssh -X usuario@servidor
+	cd /opt/firewall-app/mikrotik_vlan_modes_tk_app
+	source .venv/bin/activate
+	./modo_salo.sh
+	```
+
+	El equipo cliente debe tener un servidor X instalado y el servidor SSH debe
+	permitir `X11Forwarding`.
+- Usar un escritorio remoto o VNC en el servidor.
+
+Un display virtual como `Xvfb` solo sirve para ejecutar la aplicación sin verla;
+no es útil para manejar esta interfaz de forma interactiva.
+
 ### 7. Seleccionar `MODE_SELECTIVE`
 
 Pulsa **Actualizar estado** para consultar las listas `ALLOW_*` disponibles.
@@ -203,6 +228,13 @@ modo.
 - La lista `MODE_SELECTIVE` y las listas `ALLOW_*` deben existir en las reglas del firewall con la semántica mostrada en el diagrama.
 
 ## Historial de versiones
+
+### 1.2.0
+
+`get_vlan_mode` verifica `SRC_GENERAL` en una sola consulta REST, las listas
+`ALLOW_*` pasan a un catálogo fijo, los identificadores `.id` de RouterOS ya
+no codifican el `*`, y la limpieza de `conntrack` se trata como una acción
+best-effort independiente del cambio de modo.
 
 ### 1.1.3
 

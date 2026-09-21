@@ -12,6 +12,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -117,15 +118,35 @@ class VlanModeApp(tk.Tk):
         for btn in (self.refresh_btn, self.exam_btn, self.restricted_btn, self.selective_btn, self.normal_btn):
             btn.config(state=state)
 
+    def clear_connections_best_effort(self) -> None:
+        """
+        Intenta eliminar las conexiones activas de la VLAN.
+        Si falla, no invalida el cambio de modo realizado.
+        """
+        try:
+            removed = self.client.clear_connections_for_network(self.config.network)
+            self.after(
+                0,
+                lambda: self.append_log(
+                    f"Conexiones eliminadas de conntrack: {removed}"
+                ),
+            )
+        except Exception as exc:
+            error_message = str(exc)
+            self.after(
+                0,
+                lambda: self.append_log(
+                    "ADVERTENCIA: el modo se ha cambiado correctamente, "
+                    f"pero no se pudo limpiar conntrack: {error_message}"
+                ),
+            )
+
     def run_async(self, label: str, func) -> None:
         def worker():
             self.after(0, lambda: self.set_buttons_enabled(False))
             self.after(0, lambda: self.append_log(f"\n=== {label} ==="))
             try:
                 func()
-                mode = self.client.get_vlan_mode(self.config.network)
-                self.after(0, lambda: self.status_var.set(f"Estado actual: {mode}"))
-                self.after(0, lambda: self.append_log("Operación completada correctamente."))
             except Exception as exc:
                 error_message = str(exc)
                 self.after(0, lambda: messagebox.showerror("Error", error_message))
@@ -134,6 +155,30 @@ class VlanModeApp(tk.Tk):
                 self.after(0, lambda: self.set_buttons_enabled(True))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def apply_mode_change(self, expected_mode: str, apply_func, extra_success_lines=()) -> None:
+        apply_func()
+
+        # el cambio de address-list se da por bueno solo si el estado verificado coincide
+        mode = self.client.get_vlan_mode(self.config.network)
+        self.after(0, lambda: self.status_var.set(f"Estado actual: {mode}"))
+
+        if mode != expected_mode:
+            raise MikroTikError(
+                f"El modo solicitado era {expected_mode} pero el estado verificado es {mode}."
+            )
+
+        # los checkbox ALLOW_* solo tienen sentido mientras la VLAN sigue en MODE_SELECTIVE
+        if mode != "MODE_SELECTIVE":
+            self.after(0, lambda: self.update_allow_vars(set()))
+
+        self.after(0, lambda: self.append_log("Modo cambiado correctamente."))
+        self.after(0, lambda: self.append_log(f"Estado verificado: {mode}."))
+        for line in extra_success_lines:
+            self.after(0, lambda line=line: self.append_log(line))
+
+        # la limpieza de conntrack es una acción posterior: si falla no invalida el cambio de modo
+        self.clear_connections_best_effort()
 
     def refresh_status(self) -> None:
         def op():
@@ -148,44 +193,45 @@ class VlanModeApp(tk.Tk):
 
     def set_exam(self) -> None:
         def op():
-            self.client.set_mode_exam(
-                network=self.config.network,
-                comment=f"MODE_EXAM | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+            self.apply_mode_change(
+                "MODE_EXAM",
+                lambda: self.client.set_mode_exam(
+                    network=self.config.network,
+                    comment=f"MODE_EXAM | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+                ),
             )
-            removed = self.client.clear_connections_for_network(self.config.network)
-            self.after(0, lambda: self.append_log(f"Conexiones eliminadas: {removed}"))
         self.run_async("Cambiar a MODE_EXAM", op)
 
     def set_restricted(self) -> None:
         def op():
-            self.client.set_mode_restricted(
-                network=self.config.network,
-                comment=f"MODE_RESTRICTED | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+            self.apply_mode_change(
+                "MODE_RESTRICTED",
+                lambda: self.client.set_mode_restricted(
+                    network=self.config.network,
+                    comment=f"MODE_RESTRICTED | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+                ),
             )
-            removed = self.client.clear_connections_for_network(self.config.network)
-            self.after(0, lambda: self.append_log(f"Conexiones eliminadas: {removed}"))
         self.run_async("Cambiar a MODE_RESTRICTED", op)
 
     def set_selective(self) -> None:
         selected = [name for name, variable in self.allow_vars.items() if variable.get()]
 
         def op():
-            self.client.set_mode_selective(
-                network=self.config.network,
-                allow_lists=selected,
-                comment=f"MODE_SELECTIVE | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+            self.apply_mode_change(
+                "MODE_SELECTIVE",
+                lambda: self.client.set_mode_selective(
+                    network=self.config.network,
+                    allow_lists=selected,
+                    comment=f"MODE_SELECTIVE | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+                ),
+                extra_success_lines=[f"Listas ALLOW activas: {', '.join(selected) or 'ninguna'}"],
             )
-            removed = self.client.clear_connections_for_network(self.config.network)
-            self.after(0, lambda: self.append_log(f"Listas ALLOW activas: {', '.join(selected) or 'ninguna'}"))
-            self.after(0, lambda: self.append_log(f"Conexiones eliminadas: {removed}"))
 
         self.run_async("Cambiar a MODE_SELECTIVE", op)
 
     def set_normal(self) -> None:
         def op():
-            self.client.set_mode_normal(self.config.network)
-            removed = self.client.clear_connections_for_network(self.config.network)
-            self.after(0, lambda: self.append_log(f"Conexiones eliminadas: {removed}"))
+            self.apply_mode_change("MODE_NORMAL", lambda: self.client.set_mode_normal(self.config.network))
         self.run_async("Cambiar a MODE_NORMAL", op)
 
 
@@ -204,7 +250,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        print(
+            "No se puede iniciar la interfaz gráfica: no hay un display X disponible. "
+            "Ejecuta la aplicación desde un escritorio gráfico o conecta por SSH con "
+            "reenvío X11 (ssh -X). Detalle: " + str(exc),
+            file=sys.stderr,
+        )
+        return 2
+
     root.withdraw()
     password = simpledialog.askstring(
         "Credenciales MikroTik",

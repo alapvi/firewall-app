@@ -12,6 +12,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 ALLOW_LIST_PREFIX = "ALLOW_"
 
+# RouterOS no tiene listas vacías: una address-list solo existe mediante sus entradas,
+# por eso el catálogo de listas opcionales se declara aquí en vez de descubrirse por API.
+OPTIONAL_ALLOW_LISTS = {
+    "ALLOW_AI",
+    "ALLOW_SEARCH",
+    "ALLOW_M365",
+    "ALLOW_SIMARRO",
+    "ALLOW_ISOS",
+    "ALLOW_VIDEOGAME",
+    "ALLOW_FULL_INTERNET",
+}
+
 
 class MikroTikError(RuntimeError):
     pass
@@ -91,7 +103,7 @@ class MikroTikRestClient:
             entry_id = entry.get(".id")
             if not entry_id:
                 continue
-            safe_id = quote(entry_id, safe="")
+            safe_id = quote(entry_id, safe="*")
             try:
                 self._request("DELETE", f"/ip/firewall/address-list/{safe_id}")
             except MikroTikError:
@@ -100,28 +112,35 @@ class MikroTikRestClient:
         return removed
 
     def get_vlan_mode(self, network: str) -> str:
-        in_exam = bool(self.find_address_entries("MODE_EXAM", network))
-        in_restricted = bool(self.find_address_entries("MODE_RESTRICTED", network))
-        in_selective = bool(self.find_address_entries("MODE_SELECTIVE", network))
+        entries = self.get_address_list_entries()
 
-        active_modes = sum((in_exam, in_restricted, in_selective))
-        if active_modes > 1:
+        active_lists = {
+            entry.get("list")
+            for entry in entries
+            if entry.get("address") == network
+            and str(entry.get("disabled", "false")).lower() not in ("true", "yes")
+        }
+
+        modes = {
+            mode
+            for mode in ("MODE_EXAM", "MODE_RESTRICTED", "MODE_SELECTIVE")
+            if mode in active_lists
+        }
+
+        if len(modes) > 1:
             return "ERROR: VLAN presente en varios modos"
-        if in_exam:
+        if "MODE_EXAM" in modes:
             return "MODE_EXAM"
-        if in_restricted:
+        if "MODE_RESTRICTED" in modes:
             return "MODE_RESTRICTED"
-        if in_selective:
+        if "MODE_SELECTIVE" in modes:
             return "MODE_SELECTIVE"
-        return "MODE_NORMAL"
+        if "SRC_GENERAL" in active_lists:
+            return "MODE_NORMAL"
+        return "ERROR: VLAN fuera de SRC_GENERAL y sin modo asignado"
 
     def get_allow_list_names(self) -> set[str]:
-        return {
-            entry["list"]
-            for entry in self.get_address_list_entries()
-            if isinstance(entry.get("list"), str)
-            and entry["list"].startswith(ALLOW_LIST_PREFIX)
-        }
+        return set(OPTIONAL_ALLOW_LISTS)
 
     def get_optional_allows(self, network: str) -> set[str]:
         entries = self.get_address_list_entries()
@@ -153,9 +172,9 @@ class MikroTikRestClient:
         comment: str = "",
     ) -> None:
         selected = set(allow_lists)
-        invalid = {name for name in selected if not name.startswith(ALLOW_LIST_PREFIX)}
+        invalid = selected.difference(OPTIONAL_ALLOW_LISTS)
         if invalid:
-            raise ValueError(f"Las listas deben empezar por {ALLOW_LIST_PREFIX}: {', '.join(sorted(invalid))}")
+            raise ValueError(f"Listas ALLOW no permitidas: {', '.join(sorted(invalid))}")
 
         self.remove_address("MODE_EXAM", network)
         self.remove_address("MODE_RESTRICTED", network)
@@ -189,11 +208,15 @@ class MikroTikRestClient:
         to_remove: list[str] = []
 
         for conn in self.get_connections():
-            src = self._ip_part(conn.get("src-address"))
-            dst = self._ip_part(conn.get("dst-address"))
+            addresses = (
+                self._ip_part(conn.get("src-address")),
+                self._ip_part(conn.get("dst-address")),
+                self._ip_part(conn.get("reply-src-address")),
+                self._ip_part(conn.get("reply-dst-address")),
+            )
 
             match = False
-            for ip_text in (src, dst):
+            for ip_text in addresses:
                 if not ip_text:
                     continue
                 try:
@@ -208,11 +231,8 @@ class MikroTikRestClient:
 
         removed = 0
         for entry_id in to_remove:
-            safe_id = quote(entry_id, safe="")
-            try:
-                self._request("DELETE", f"/ip/firewall/connection/{safe_id}")
-            except MikroTikError:
-                self._request("POST", "/ip/firewall/connection/remove", json={".id": entry_id})
+            safe_id = quote(entry_id, safe="*")
+            self._request("DELETE", f"/ip/firewall/connection/{safe_id}")
             removed += 1
 
         return removed
