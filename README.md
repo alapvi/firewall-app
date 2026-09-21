@@ -42,6 +42,61 @@ firewall. La aplicación solo añade o elimina la red de la VLAN en
 `MODE_SELECTIVE` y en las listas `ALLOW_*` que se seleccionen desde la
 interfaz.
 
+## Funcionamiento de los modos
+
+Las reglas `forward` de MikroTik consultan la lista de direcciones a la que
+pertenece la red de la VLAN. En todos los modos se aceptan primero las
+conexiones ya establecidas o relacionadas; el resto del tráfico se evalúa
+según el modo activo.
+
+### `MODE_EXAM`
+
+La red pertenece a `MODE_EXAM`. Se permiten los servicios necesarios para el
+entorno de examen:
+
+- DNS de Conselleria por UDP y TCP en el puerto 53.
+- `idGVA`.
+- `Aules/GVA`.
+- Acceso al CCR `10.99.0.1`.
+
+El resto del tráfico se descarta (`DROP`).
+
+### `MODE_RESTRICTED`
+
+La red pertenece a `MODE_RESTRICTED`. Mantiene los permisos base de examen y
+añade los servicios definidos para el modo restringido:
+
+- DNS de Conselleria por UDP y TCP en el puerto 53.
+- `idGVA`.
+- `Aules/GVA`.
+- `Microsoft365`.
+- Servicios de IA y buscadores.
+- Servicios de Simarro.
+- Acceso al CCR `10.99.0.1`.
+
+El resto del tráfico se descarta (`DROP`).
+
+### `MODE_SELECTIVE`
+
+La red pertenece a `MODE_SELECTIVE` y recibe únicamente la base común:
+
+- DNS de Conselleria por UDP y TCP en el puerto 53.
+- `idGVA`.
+- `Aules/GVA`.
+
+Desde la aplicación se pueden seleccionar permisos adicionales mediante las
+listas `ALLOW_*`. Cada lista seleccionada recibe la red de la VLAN como una
+entrada y amplía los destinos permitidos por las reglas del firewall. El resto
+del tráfico se descarta (`DROP`).
+
+### `MODE_NORMAL`
+
+La red deja de pertenecer a `MODE_EXAM`, `MODE_RESTRICTED` y
+`MODE_SELECTIVE`, y también se eliminan sus entradas de las listas `ALLOW_*`.
+Vuelve al comportamiento normal basado en `SRC_GENERAL`, con acceso a los
+servicios habituales como Proxmox, Red Servicios e Internet. El tráfico hacia
+otras redes internas que no esté permitido se bloquea (`DROP`).
+
 Versión sin Qt/PySide6, pensada para servidores Ubuntu antiguos donde Qt falla por CPU sin SSSE3/SSE4.
 
 ## Instalar en Ubuntu
