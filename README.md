@@ -3,6 +3,13 @@
 La aplicación permite cambiar una VLAN entre `MODE_NORMAL`, `MODE_EXAM`,
 `MODE_RESTRICTED` y `MODE_SELECTIVE`.
 
+## Versión 1.3.0
+
+- Los checkbox `ALLOW_*` aplican el cambio inmediatamente al marcarlos o desmarcarlos, sin esperar a pulsar "Pasar a MODE_SELECTIVE".
+- Los checkbox `ALLOW_*` solo están habilitados mientras la VLAN está en `MODE_SELECTIVE`; en el resto de modos aparecen deshabilitados.
+- La ventana se ajusta automáticamente al tamaño de la pantalla y se puede redimensionar.
+- Cada cambio de modo (`MODE_EXAM`, `MODE_RESTRICTED`, `MODE_SELECTIVE`, `MODE_NORMAL`) pide confirmación antes de aplicarse; si se cancela, no se realiza ninguna petición al MikroTik.
+
 ## Versión 1.2.0
 
 - Añadido `MODE_SELECTIVE`.
@@ -228,6 +235,13 @@ modo.
 - La lista `MODE_SELECTIVE` y las listas `ALLOW_*` deben existir en las reglas del firewall con la semántica mostrada en el diagrama.
 
 ## Historial de versiones
+
+### 1.3.0
+
+Los permisos `ALLOW_*` se activan o desactivan al instante mientras la VLAN
+está en `MODE_SELECTIVE` y quedan deshabilitados en el resto de modos. La
+ventana se adapta al tamaño de la pantalla y todos los cambios de modo piden
+confirmación antes de aplicarse.
 
 ### 1.2.0
 

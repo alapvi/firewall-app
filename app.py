@@ -46,11 +46,27 @@ class VlanModeApp(tk.Tk):
             timeout=12,
         )
 
+        # los checkbox ALLOW_* solo se habilitan cuando este valor es "MODE_SELECTIVE"
+        self.current_mode: str | None = None
+
         self.title(f"MikroTik VLAN Modes - VLAN {config.vlan_id}")
-        self.geometry("850x560")
+        self.minsize(760, 480)
+        self.resizable(True, True)
+        self._fit_to_screen()
 
         self._build_ui()
         self.refresh_status()
+
+    def _fit_to_screen(self) -> None:
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+
+        width = max(760, min(950, int(screen_width * 0.8)))
+        height = max(480, min(680, int(screen_height * 0.8)))
+        x = max((screen_width - width) // 2, 0)
+        y = max((screen_height - height) // 2, 0)
+
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     def _build_ui(self) -> None:
         title = tk.Label(self, text="Gestión de modo de VLAN", font=("Arial", 18, "bold"))
@@ -105,18 +121,30 @@ class VlanModeApp(tk.Tk):
         for child in self.allow_frame.winfo_children():
             child.destroy()
 
+        allow_state = "normal" if self.current_mode == "MODE_SELECTIVE" else "disabled"
         self.allow_vars = {}
+        self.allow_checkbuttons = []
         for column, name in enumerate(sorted(available_lists)):
             variable = tk.BooleanVar(value=False)
             self.allow_vars[name] = variable
-            tk.Checkbutton(self.allow_frame, text=name, variable=variable).grid(
-                row=column // 4, column=column % 4, padx=5, pady=4, sticky="w"
+            checkbutton = tk.Checkbutton(
+                self.allow_frame,
+                text=name,
+                variable=variable,
+                state=allow_state,
+                command=lambda name=name: self.toggle_allow_list(name),
             )
+            checkbutton.grid(row=column // 4, column=column % 4, padx=5, pady=4, sticky="w")
+            self.allow_checkbuttons.append(checkbutton)
 
     def set_buttons_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         for btn in (self.refresh_btn, self.exam_btn, self.restricted_btn, self.selective_btn, self.normal_btn):
             btn.config(state=state)
+
+        allow_state = "normal" if enabled and self.current_mode == "MODE_SELECTIVE" else "disabled"
+        for checkbutton in self.allow_checkbuttons:
+            checkbutton.config(state=allow_state)
 
     def clear_connections_best_effort(self) -> None:
         """
@@ -162,6 +190,7 @@ class VlanModeApp(tk.Tk):
         # el cambio de address-list se da por bueno solo si el estado verificado coincide
         mode = self.client.get_vlan_mode(self.config.network)
         self.after(0, lambda: self.status_var.set(f"Estado actual: {mode}"))
+        self.after(0, lambda: setattr(self, "current_mode", mode))
 
         if mode != expected_mode:
             raise MikroTikError(
@@ -186,12 +215,49 @@ class VlanModeApp(tk.Tk):
             available_lists = self.client.get_allow_list_names()
             active_allows = self.client.get_optional_allows(self.config.network)
             self.after(0, lambda: self.status_var.set(f"Estado actual: {mode}"))
+            self.after(0, lambda: setattr(self, "current_mode", mode))
             self.after(0, lambda: self.update_allow_options(available_lists))
             self.after(0, lambda: self.update_allow_vars(active_allows if mode == "MODE_SELECTIVE" else set()))
             self.after(0, lambda: self.append_log(f"Estado actual de {self.config.network}: {mode}"))
         self.run_async("Actualizar estado", op)
 
+    def toggle_allow_list(self, list_name: str) -> None:
+        # el Checkbutton ya cambió su valor antes de invocar este callback
+        add_entry = self.allow_vars[list_name].get()
+
+        def op():
+            mode = self.client.get_vlan_mode(self.config.network)
+            if mode != "MODE_SELECTIVE":
+                self.after(0, lambda: self.allow_vars[list_name].set(not add_entry))
+                raise MikroTikError(
+                    "Los permisos ALLOW_* solo se pueden aplicar mientras la VLAN está en MODE_SELECTIVE "
+                    f"(estado actual: {mode})."
+                )
+
+            if add_entry:
+                self.client.add_address_if_missing(
+                    list_name,
+                    self.config.network,
+                    comment=f"MODE_SELECTIVE | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
+                )
+                self.after(0, lambda: self.append_log(f"{list_name}: red añadida."))
+            else:
+                self.client.remove_address(list_name, self.config.network)
+                self.after(0, lambda: self.append_log(f"{list_name}: red eliminada."))
+
+        self.run_async(f"Actualizar {list_name}", op)
+
+    def confirm_mode_change(self, mode_label: str) -> bool:
+        return messagebox.askyesno(
+            "Confirmar cambio de modo",
+            f"¿Seguro que quieres cambiar la VLAN {self.config.vlan_id} ({self.config.network}) "
+            f"a {mode_label}?",
+        )
+
     def set_exam(self) -> None:
+        if not self.confirm_mode_change("MODE_EXAM"):
+            return
+
         def op():
             self.apply_mode_change(
                 "MODE_EXAM",
@@ -203,6 +269,9 @@ class VlanModeApp(tk.Tk):
         self.run_async("Cambiar a MODE_EXAM", op)
 
     def set_restricted(self) -> None:
+        if not self.confirm_mode_change("MODE_RESTRICTED"):
+            return
+
         def op():
             self.apply_mode_change(
                 "MODE_RESTRICTED",
@@ -215,6 +284,14 @@ class VlanModeApp(tk.Tk):
 
     def set_selective(self) -> None:
         selected = [name for name, variable in self.allow_vars.items() if variable.get()]
+
+        allow_summary = ', '.join(sorted(selected)) or 'ninguna lista ALLOW_*'
+        if not messagebox.askyesno(
+            "Confirmar cambio de modo",
+            f"¿Seguro que quieres cambiar la VLAN {self.config.vlan_id} ({self.config.network}) "
+            f"a MODE_SELECTIVE con {allow_summary}?",
+        ):
+            return
 
         def op():
             self.apply_mode_change(
@@ -230,6 +307,9 @@ class VlanModeApp(tk.Tk):
         self.run_async("Cambiar a MODE_SELECTIVE", op)
 
     def set_normal(self) -> None:
+        if not self.confirm_mode_change("MODE_NORMAL"):
+            return
+
         def op():
             self.apply_mode_change("MODE_NORMAL", lambda: self.client.set_mode_normal(self.config.network))
         self.run_async("Cambiar a MODE_NORMAL", op)
