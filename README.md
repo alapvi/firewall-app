@@ -23,6 +23,25 @@ Las listas opcionales conocidas actualmente son `ALLOW_AI`, `ALLOW_SEARCH`,
 `ALLOW_FULL_INTERNET`, aunque la aplicación también admite cualquier nueva
 lista cuyo nombre empiece por `ALLOW_`.
 
+### Flujo de modos
+
+```text
+MODE_EXAM
+	-> MODE_RESTRICTED
+	-> MODE_SELECTIVE
+		 - base: DNS Conselleria
+		 - base: idGVA
+		 - base: Aules/GVA
+		 - permisos opcionales: ALLOW_*
+		 - resto: DROP
+	-> MODE_NORMAL
+```
+
+Las reglas base de `MODE_SELECTIVE` las proporciona la configuración del
+firewall. La aplicación solo añade o elimina la red de la VLAN en
+`MODE_SELECTIVE` y en las listas `ALLOW_*` que se seleccionen desde la
+interfaz.
+
 Versión sin Qt/PySide6, pensada para servidores Ubuntu antiguos donde Qt falla por CPU sin SSSE3/SSE4.
 
 ## Instalar en Ubuntu
