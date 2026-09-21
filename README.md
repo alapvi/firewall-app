@@ -3,13 +3,14 @@
 La aplicación permite cambiar una VLAN entre `MODE_NORMAL`, `MODE_EXAM`,
 `MODE_RESTRICTED` y `MODE_SELECTIVE`.
 
-## Versión 1.1.0
+## Versión 1.1.3
 
 - Añadido `MODE_SELECTIVE`.
 - Descubrimiento dinámico de todas las listas `ALLOW_*` disponibles en MikroTik.
 - Selección de permisos opcionales desde la interfaz Tkinter.
 - Limpieza automática de las listas `ALLOW_*` al cambiar a otro modo.
 - Refresco de las listas disponibles mediante "Actualizar estado".
+- Instalación documentada paso a paso para Ubuntu.
 
 En `MODE_SELECTIVE`, la red se añade siempre a `MODE_SELECTIVE` y, de forma
 opcional, a las listas disponibles cuyo nombre empieza por `ALLOW_`. La
@@ -99,33 +100,100 @@ otras redes internas que no esté permitido se bloquea (`DROP`).
 
 Versión sin Qt/PySide6, pensada para servidores Ubuntu antiguos donde Qt falla por CPU sin SSSE3/SSE4.
 
-## Instalar en Ubuntu
+## Instalación en Ubuntu
+
+### 1. Instalar Python y Tkinter
+
+Ejecuta estos comandos con un usuario que tenga permisos `sudo`:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip python3-tk unzip
+sudo apt install -y python3 python3-venv python3-pip python3-tk unzip git
+```
 
+### 2. Obtener la aplicación
+
+Elige una de estas dos opciones.
+
+Desde GitHub:
+
+```bash
+sudo mkdir -p /opt/firewall-app
+sudo chown "$USER":"$USER" /opt/firewall-app
+cd /opt/firewall-app
+git clone https://github.com/alapvi/firewall-app.git mikrotik_vlan_modes_tk_app
+cd mikrotik_vlan_modes_tk_app
+```
+
+Desde un archivo ZIP:
+
+```bash
+mkdir -p /opt/firewall-app
 cd /opt/firewall-app
 unzip mikrotik_vlan_modes_tk_app.zip
 cd mikrotik_vlan_modes_tk_app
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 ```
 
-## Ejecutar
+### 3. Crear el entorno virtual
+
+El entorno virtual mantiene las dependencias aisladas del Python del sistema:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+El prompt del terminal mostrará normalmente `(.venv)` mientras esté activo.
+
+### 4. Instalar las dependencias
+
+Con el entorno virtual activo:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### 5. Comprobar los requisitos de MikroTik
+
+Antes de ejecutar la aplicación, confirma que en el CCR están disponibles:
+
+- `www-ssl` activo en el puerto `7443`.
+- Reglas `input` permitiendo `SRC_TODAS_LAN -> 10.99.0.1:7443`.
+- Un usuario con permisos para modificar `/ip firewall address-list` y limpiar
+	`/ip firewall connection`.
+- La lista `MODE_SELECTIVE` y las listas `ALLOW_*` usadas por las reglas del
+	firewall.
+
+### 6. Configurar la VLAN
+
+El script `modo_salo.sh` ya viene preparado para la VLAN 21, red
+`10.0.21.0/24` y nombre `Saló de Actes`:
 
 ```bash
 ./modo_salo.sh
 ```
 
-O manualmente:
+Si la VLAN es diferente, edita ese script o ejecuta la aplicación manualmente:
 
 ```bash
 source .venv/bin/activate
-python3 app.py --host 10.99.0.1 --port 7443 --user firewall-app --vlan 21 --network 10.0.21.0/24 --name "Saló de Actes"
+python app.py --host 10.99.0.1 --port 7443 --user firewall-app \
+	--vlan 21 --network 10.0.21.0/24 --name "Saló de Actes"
 ```
+
+La aplicación solicitará la contraseña de MikroTik en una ventana, no desde la
+línea de comandos.
+
+### 7. Seleccionar `MODE_SELECTIVE`
+
+Pulsa **Actualizar estado** para consultar las listas `ALLOW_*` disponibles.
+Marca las listas que quieras aplicar y pulsa **Pasar a MODE_SELECTIVE**. La red
+se añadirá a `MODE_SELECTIVE` y a cada lista seleccionada.
+
+Para salir del modo selectivo, cambia a `MODE_EXAM`, `MODE_RESTRICTED` o
+`MODE_NORMAL`. Las entradas `ALLOW_*` de esa VLAN se eliminarán al cambiar de
+modo.
 
 ## Requisitos en MikroTik
 
@@ -135,6 +203,12 @@ python3 app.py --host 10.99.0.1 --port 7443 --user firewall-app --vlan 21 --netw
 - La lista `MODE_SELECTIVE` y las listas `ALLOW_*` deben existir en las reglas del firewall con la semántica mostrada en el diagrama.
 
 ## Historial de versiones
+
+### 1.1.3
+
+Guía de instalación ampliada con pasos para obtener el código, crear el
+entorno virtual, instalar dependencias, configurar la VLAN y ejecutar la
+aplicación.
 
 ### 1.1.0
 
