@@ -18,7 +18,10 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 from dataclasses import dataclass
 
-from mikrotik_api import MikroTikRestClient, MikroTikError
+from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
+from vlan_controller import OperationInProgressError, StatusSnapshot, VlanController
+
+APP_VERSION = "1.3.1"
 
 
 @dataclass(frozen=True)
@@ -45,11 +48,17 @@ class VlanModeApp(tk.Tk):
             verify_ssl=config.verify_ssl,
             timeout=12,
         )
+        self.controller = VlanController(
+            client=self.client,
+            network=config.network,
+            comment=f"VLAN{config.vlan_id} | {config.vlan_name}",
+        )
 
-        # los checkbox ALLOW_* solo se habilitan cuando este valor es "MODE_SELECTIVE"
+        # espejo local de controller.current_mode: los checkbox ALLOW_* solo se
+        # habilitan cuando vale "MODE_SELECTIVE" y el estado ha podido verificarse
         self.current_mode: str | None = None
 
-        self.title(f"MikroTik VLAN Modes - VLAN {config.vlan_id}")
+        self.title(f"MikroTik VLAN Modes v{APP_VERSION} - VLAN {config.vlan_id}")
         self.minsize(760, 480)
         self.resizable(True, True)
         self._fit_to_screen()
@@ -93,11 +102,16 @@ class VlanModeApp(tk.Tk):
         self.restricted_btn = tk.Button(frame, text="Pasar a MODE_RESTRICTED", width=24, command=self.set_restricted)
         self.selective_btn = tk.Button(frame, text="Pasar a MODE_SELECTIVE", width=24, command=self.set_selective)
         self.normal_btn = tk.Button(frame, text="Pasar a MODE_NORMAL", width=22, command=self.set_normal)
+        self.legacy_btn = tk.Button(
+            frame, text="Eliminar ALLOW_MICROSOFT heredada", width=28, command=self.migrate_legacy_allows
+        )
 
         allow_frame = tk.LabelFrame(self, text="Permisos opcionales para MODE_SELECTIVE")
         allow_frame.pack(fill="x", padx=14, pady=(2, 8))
         self.allow_frame = allow_frame
         self.allow_vars = {}
+        self.allow_checkbuttons = []
+        self.legacy_allows: set[str] = set()
         self.update_allow_options(())
 
         self.refresh_btn.grid(row=0, column=0, padx=5, pady=5)
@@ -105,6 +119,7 @@ class VlanModeApp(tk.Tk):
         self.restricted_btn.grid(row=0, column=2, padx=5, pady=5)
         self.selective_btn.grid(row=0, column=3, padx=5, pady=5)
         self.normal_btn.grid(row=0, column=4, padx=5, pady=5)
+        self.legacy_btn.grid(row=1, column=0, columnspan=5, padx=5, pady=(0, 5))
 
         self.log = tk.Text(self, height=22, wrap="word")
         self.log.pack(fill="both", expand=True, padx=14, pady=14)
@@ -139,17 +154,51 @@ class VlanModeApp(tk.Tk):
 
     def set_buttons_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for btn in (self.refresh_btn, self.exam_btn, self.restricted_btn, self.selective_btn, self.normal_btn):
+        for btn in (
+            self.refresh_btn,
+            self.exam_btn,
+            self.restricted_btn,
+            self.selective_btn,
+            self.normal_btn,
+            self.legacy_btn,
+        ):
             btn.config(state=state)
 
         allow_state = "normal" if enabled and self.current_mode == "MODE_SELECTIVE" else "disabled"
         for checkbutton in self.allow_checkbuttons:
             checkbutton.config(state=allow_state)
 
+    def _show_unknown_state(self) -> None:
+        # Estado no verificado: no se afirma éxito ni rollback, y las casillas
+        # dejan de presentarse como confirmadas hasta la próxima lectura correcta.
+        self.current_mode = None
+        self.status_var.set("Estado actual: DESCONOCIDO (no verificado)")
+        for checkbutton in self.allow_checkbuttons:
+            checkbutton.config(state="disabled")
+
+    def _apply_snapshot(self, snapshot: StatusSnapshot) -> None:
+        self.current_mode = snapshot.mode
+        self.status_var.set(f"Estado actual: {snapshot.mode}")
+        self.update_allow_vars(snapshot.active_allows)
+        allow_state = "normal" if snapshot.mode == "MODE_SELECTIVE" else "disabled"
+        for checkbutton in self.allow_checkbuttons:
+            checkbutton.config(state=allow_state)
+
+        self.legacy_allows = snapshot.legacy_allows
+        if snapshot.legacy_allows:
+            self.append_log(
+                "AVISO: listas ALLOW_* heredadas detectadas para esta red: "
+                f"{', '.join(sorted(snapshot.legacy_allows))}. No se migran automáticamente; "
+                "usa 'Eliminar ALLOW_MICROSOFT heredada' o revisa el README."
+            )
+
     def clear_connections_best_effort(self) -> None:
         """
         Intenta eliminar las conexiones activas de la VLAN.
-        Si falla, no invalida el cambio de modo realizado.
+        Si falla, no invalida el cambio de modo realizado. Si el firewall acepta
+        conexiones ya establecidas antes de evaluar el modo/las listas, esta
+        limpieza es la única forma de forzar el corte de sesiones abiertas
+        previamente: las listas de address-list por sí solas no lo garantizan.
         """
         try:
             removed = self.client.clear_connections_for_network(self.config.network)
@@ -169,83 +218,144 @@ class VlanModeApp(tk.Tk):
                 ),
             )
 
-    def run_async(self, label: str, func) -> None:
+    def run_async(self, label: str, func, on_busy=None) -> None:
+        try:
+            self.controller.begin_operation()
+        except OperationInProgressError as exc:
+            if on_busy:
+                on_busy()
+            messagebox.showwarning("Operación en curso", str(exc))
+            return
+
         def worker():
             self.after(0, lambda: self.set_buttons_enabled(False))
             self.after(0, lambda: self.append_log(f"\n=== {label} ==="))
             try:
                 func()
             except Exception as exc:
-                error_message = str(exc)
-                self.after(0, lambda: messagebox.showerror("Error", error_message))
-                self.after(0, lambda: self.append_log(f"ERROR: {error_message}"))
+                self._handle_failure(exc)
             finally:
+                self.controller.end_operation()
                 self.after(0, lambda: self.set_buttons_enabled(True))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def apply_mode_change(self, expected_mode: str, apply_func, extra_success_lines=()) -> None:
-        apply_func()
+    def _handle_failure(self, exc: Exception) -> None:
+        error_message = str(exc)
+        self.after(0, lambda: self.append_log(f"ERROR: {error_message}"))
 
-        # el cambio de address-list se da por bueno solo si el estado verificado coincide
-        mode = self.client.get_vlan_mode(self.config.network)
-        self.after(0, lambda: self.status_var.set(f"Estado actual: {mode}"))
-        self.after(0, lambda: setattr(self, "current_mode", mode))
-
-        if mode != expected_mode:
-            raise MikroTikError(
-                f"El modo solicitado era {expected_mode} pero el estado verificado es {mode}."
+        if isinstance(exc, MikroTikConnectionError):
+            # Se perdió la conexión: no se puede verificar el resultado, así que no
+            # se afirma éxito ni rollback del cambio solicitado.
+            self.after(
+                0,
+                lambda: self.append_log(
+                    "Estado no verificado: se perdió la conexión con el router antes de "
+                    "poder confirmar el resultado."
+                ),
             )
+            self.after(0, self._show_unknown_state)
+            self.after(0, lambda: messagebox.showerror("Sin conexión", error_message))
+            return
 
-        # los checkbox ALLOW_* solo tienen sentido mientras la VLAN sigue en MODE_SELECTIVE
-        if mode != "MODE_SELECTIVE":
-            self.after(0, lambda: self.update_allow_vars(set()))
+        self.after(0, lambda: messagebox.showerror("Error", error_message))
 
-        self.after(0, lambda: self.append_log("Modo cambiado correctamente."))
-        self.after(0, lambda: self.append_log(f"Estado verificado: {mode}."))
-        for line in extra_success_lines:
-            self.after(0, lambda line=line: self.append_log(line))
+        # Se intenta recuperar el estado real tras el error, cuando sea posible.
+        try:
+            snapshot = self.controller.refresh_status()
+        except MikroTikError:
+            # Incluye tanto la pérdida de conexión como cualquier error REST (p. ej.
+            # HTTP 403) que impida confirmar el estado: en ambos casos no se puede
+            # verificar, así que se muestra como desconocido en vez de dejar visible
+            # un estado antiguo.
+            self.after(
+                0,
+                lambda: self.append_log(
+                    "No se pudo confirmar el estado real tras el error (estado no verificado)."
+                ),
+            )
+            self.after(0, self._show_unknown_state)
+            return
 
-        # la limpieza de conntrack es una acción posterior: si falla no invalida el cambio de modo
-        self.clear_connections_best_effort()
+        self.after(0, lambda: self._apply_snapshot(snapshot))
+        self.after(0, lambda: self.append_log(f"Estado real confirmado tras el error: {snapshot.mode}"))
 
     def refresh_status(self) -> None:
         def op():
-            mode = self.client.get_vlan_mode(self.config.network)
             available_lists = self.client.get_allow_list_names()
-            active_allows = self.client.get_optional_allows(self.config.network)
-            self.after(0, lambda: self.status_var.set(f"Estado actual: {mode}"))
-            self.after(0, lambda: setattr(self, "current_mode", mode))
+            snapshot = self.controller.refresh_status()
             self.after(0, lambda: self.update_allow_options(available_lists))
-            self.after(0, lambda: self.update_allow_vars(active_allows if mode == "MODE_SELECTIVE" else set()))
-            self.after(0, lambda: self.append_log(f"Estado actual de {self.config.network}: {mode}"))
+            self.after(0, lambda: self._apply_snapshot(snapshot))
+            self.after(0, lambda: self.append_log(f"Estado actual de {self.config.network}: {snapshot.mode}"))
         self.run_async("Actualizar estado", op)
 
     def toggle_allow_list(self, list_name: str) -> None:
         # el Checkbutton ya cambió su valor antes de invocar este callback
-        add_entry = self.allow_vars[list_name].get()
+        want_enabled = self.allow_vars[list_name].get()
+
+        def revert_checkbox():
+            self.allow_vars[list_name].set(not want_enabled)
 
         def op():
-            mode = self.client.get_vlan_mode(self.config.network)
-            if mode != "MODE_SELECTIVE":
-                self.after(0, lambda: self.allow_vars[list_name].set(not add_entry))
-                raise MikroTikError(
-                    "Los permisos ALLOW_* solo se pueden aplicar mientras la VLAN está en MODE_SELECTIVE "
-                    f"(estado actual: {mode})."
+            result = self.controller.toggle_allow(list_name, want_enabled)
+
+            self.after(0, lambda: self.update_allow_vars(result.active_allows))
+
+            if not result.changed:
+                self.after(
+                    0,
+                    lambda: self.append_log(
+                        f"{list_name}: sin cambios (el estado ya coincidía con el solicitado)."
+                    ),
+                )
+                return
+
+            verb = "añadida" if result.active else "eliminada"
+            self.after(
+                0,
+                lambda: self.append_log(f"{list_name}: entrada {verb}. Estado verificado en el router."),
+            )
+
+            if result.conntrack_error:
+                self.after(
+                    0,
+                    lambda: self.append_log(
+                        "ADVERTENCIA: el permiso se ha actualizado en las listas, pero no se pudo "
+                        f"limpiar conntrack: {result.conntrack_error}. Las conexiones ya existentes "
+                        "podrían seguir activas aunque la lista ya refleje el cambio."
+                    ),
+                )
+            elif result.conntrack_cleared is not None:
+                self.after(
+                    0,
+                    lambda: self.append_log(f"Conexiones eliminadas de conntrack: {result.conntrack_cleared}"),
                 )
 
-            if add_entry:
-                self.client.add_address_if_missing(
-                    list_name,
-                    self.config.network,
-                    comment=f"MODE_SELECTIVE | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
-                )
-                self.after(0, lambda: self.append_log(f"{list_name}: red añadida."))
-            else:
-                self.client.remove_address(list_name, self.config.network)
-                self.after(0, lambda: self.append_log(f"{list_name}: red eliminada."))
+        self.run_async(f"Actualizar {list_name}", op, on_busy=revert_checkbox)
 
-        self.run_async(f"Actualizar {list_name}", op)
+    def migrate_legacy_allows(self) -> None:
+        if not self.legacy_allows:
+            messagebox.showinfo(
+                "Sin entradas heredadas",
+                "No se han detectado entradas ALLOW_MICROSOFT heredadas para esta red.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Eliminar entradas heredadas",
+            "Se eliminarán las entradas heredadas "
+            f"({', '.join(sorted(self.legacy_allows))}) de esta red exclusivamente. "
+            "No se crea ninguna entrada nueva ni se toca ALLOW_M365. ¿Continuar?",
+        ):
+            return
+
+        def op():
+            removed = self.client.remove_legacy_allow_entries(self.config.network)
+            self.after(0, lambda: self.append_log(f"Entradas heredadas eliminadas: {removed}"))
+            snapshot = self.controller.refresh_status()
+            self.after(0, lambda: self._apply_snapshot(snapshot))
+
+        self.run_async("Eliminar listas heredadas", op)
 
     def confirm_mode_change(self, mode_label: str) -> bool:
         return messagebox.askyesno(
@@ -254,18 +364,35 @@ class VlanModeApp(tk.Tk):
             f"a {mode_label}?",
         )
 
+    def apply_mode_change(self, target_mode: str, allow_lists: tuple[str, ...] = (), extra_success_lines=()) -> None:
+        result = self.controller.set_mode(target_mode, allow_lists=allow_lists)
+
+        self.after(
+            0,
+            lambda: self._apply_snapshot(
+                StatusSnapshot(
+                    mode=result.mode,
+                    active_allows=result.active_allows,
+                    legacy_allows=self.legacy_allows,
+                    verified=True,
+                )
+            ),
+        )
+        self.after(0, lambda: self.append_log("Modo cambiado correctamente."))
+        self.after(0, lambda: self.append_log(f"Estado verificado: {result.mode}."))
+        for line in extra_success_lines:
+            self.after(0, lambda line=line: self.append_log(line))
+
+        # La limpieza de conntrack es una acción posterior best-effort: si falla no
+        # invalida el cambio de modo ya confirmado por la lectura anterior.
+        self.clear_connections_best_effort()
+
     def set_exam(self) -> None:
         if not self.confirm_mode_change("MODE_EXAM"):
             return
 
         def op():
-            self.apply_mode_change(
-                "MODE_EXAM",
-                lambda: self.client.set_mode_exam(
-                    network=self.config.network,
-                    comment=f"MODE_EXAM | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
-                ),
-            )
+            self.apply_mode_change("MODE_EXAM")
         self.run_async("Cambiar a MODE_EXAM", op)
 
     def set_restricted(self) -> None:
@@ -273,17 +400,11 @@ class VlanModeApp(tk.Tk):
             return
 
         def op():
-            self.apply_mode_change(
-                "MODE_RESTRICTED",
-                lambda: self.client.set_mode_restricted(
-                    network=self.config.network,
-                    comment=f"MODE_RESTRICTED | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
-                ),
-            )
+            self.apply_mode_change("MODE_RESTRICTED")
         self.run_async("Cambiar a MODE_RESTRICTED", op)
 
     def set_selective(self) -> None:
-        selected = [name for name, variable in self.allow_vars.items() if variable.get()]
+        selected = tuple(name for name, variable in self.allow_vars.items() if variable.get())
 
         allow_summary = ', '.join(sorted(selected)) or 'ninguna lista ALLOW_*'
         if not messagebox.askyesno(
@@ -296,11 +417,7 @@ class VlanModeApp(tk.Tk):
         def op():
             self.apply_mode_change(
                 "MODE_SELECTIVE",
-                lambda: self.client.set_mode_selective(
-                    network=self.config.network,
-                    allow_lists=selected,
-                    comment=f"MODE_SELECTIVE | VLAN{self.config.vlan_id} | {self.config.vlan_name}",
-                ),
+                allow_lists=selected,
                 extra_success_lines=[f"Listas ALLOW activas: {', '.join(selected) or 'ninguna'}"],
             )
 
@@ -311,7 +428,7 @@ class VlanModeApp(tk.Tk):
             return
 
         def op():
-            self.apply_mode_change("MODE_NORMAL", lambda: self.client.set_mode_normal(self.config.network))
+            self.apply_mode_change("MODE_NORMAL")
         self.run_async("Cambiar a MODE_NORMAL", op)
 
 
