@@ -102,16 +102,12 @@ class VlanModeApp(tk.Tk):
         self.restricted_btn = tk.Button(frame, text="Pasar a MODE_RESTRICTED", width=24, command=self.set_restricted)
         self.selective_btn = tk.Button(frame, text="Pasar a MODE_SELECTIVE", width=24, command=self.set_selective)
         self.normal_btn = tk.Button(frame, text="Pasar a MODE_NORMAL", width=22, command=self.set_normal)
-        self.legacy_btn = tk.Button(
-            frame, text="Eliminar ALLOW_MICROSOFT heredada", width=28, command=self.migrate_legacy_allows
-        )
 
         allow_frame = tk.LabelFrame(self, text="Permisos opcionales para MODE_SELECTIVE")
         allow_frame.pack(fill="x", padx=14, pady=(2, 8))
         self.allow_frame = allow_frame
         self.allow_vars = {}
         self.allow_checkbuttons = []
-        self.legacy_allows: set[str] = set()
         self.update_allow_options(())
 
         self.refresh_btn.grid(row=0, column=0, padx=5, pady=5)
@@ -119,7 +115,6 @@ class VlanModeApp(tk.Tk):
         self.restricted_btn.grid(row=0, column=2, padx=5, pady=5)
         self.selective_btn.grid(row=0, column=3, padx=5, pady=5)
         self.normal_btn.grid(row=0, column=4, padx=5, pady=5)
-        self.legacy_btn.grid(row=1, column=0, columnspan=5, padx=5, pady=(0, 5))
 
         self.log = tk.Text(self, height=22, wrap="word")
         self.log.pack(fill="both", expand=True, padx=14, pady=14)
@@ -160,7 +155,6 @@ class VlanModeApp(tk.Tk):
             self.restricted_btn,
             self.selective_btn,
             self.normal_btn,
-            self.legacy_btn,
         ):
             btn.config(state=state)
 
@@ -183,14 +177,6 @@ class VlanModeApp(tk.Tk):
         allow_state = "normal" if snapshot.mode == "MODE_SELECTIVE" else "disabled"
         for checkbutton in self.allow_checkbuttons:
             checkbutton.config(state=allow_state)
-
-        self.legacy_allows = snapshot.legacy_allows
-        if snapshot.legacy_allows:
-            self.append_log(
-                "AVISO: listas ALLOW_* heredadas detectadas para esta red: "
-                f"{', '.join(sorted(snapshot.legacy_allows))}. No se migran automáticamente; "
-                "usa 'Eliminar ALLOW_MICROSOFT heredada' o revisa el README."
-            )
 
     def clear_connections_best_effort(self) -> None:
         """
@@ -333,30 +319,6 @@ class VlanModeApp(tk.Tk):
 
         self.run_async(f"Actualizar {list_name}", op, on_busy=revert_checkbox)
 
-    def migrate_legacy_allows(self) -> None:
-        if not self.legacy_allows:
-            messagebox.showinfo(
-                "Sin entradas heredadas",
-                "No se han detectado entradas ALLOW_MICROSOFT heredadas para esta red.",
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Eliminar entradas heredadas",
-            "Se eliminarán las entradas heredadas "
-            f"({', '.join(sorted(self.legacy_allows))}) de esta red exclusivamente. "
-            "No se crea ninguna entrada nueva ni se toca ALLOW_M365. ¿Continuar?",
-        ):
-            return
-
-        def op():
-            removed = self.client.remove_legacy_allow_entries(self.config.network)
-            self.after(0, lambda: self.append_log(f"Entradas heredadas eliminadas: {removed}"))
-            snapshot = self.controller.refresh_status()
-            self.after(0, lambda: self._apply_snapshot(snapshot))
-
-        self.run_async("Eliminar listas heredadas", op)
-
     def confirm_mode_change(self, mode_label: str) -> bool:
         return messagebox.askyesno(
             "Confirmar cambio de modo",
@@ -373,7 +335,6 @@ class VlanModeApp(tk.Tk):
                 StatusSnapshot(
                     mode=result.mode,
                     active_allows=result.active_allows,
-                    legacy_allows=self.legacy_allows,
                     verified=True,
                 )
             ),

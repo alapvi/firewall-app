@@ -26,7 +26,6 @@ class OperationInProgressError(RuntimeError):
 class StatusSnapshot:
     mode: str | None
     active_allows: set[str]
-    legacy_allows: set[str]
     verified: bool
 
 
@@ -80,7 +79,6 @@ class VlanController:
             active_allows = (
                 self.client.get_optional_allows(self.network) if mode == "MODE_SELECTIVE" else set()
             )
-            legacy = self.client.get_legacy_allow_entries(self.network)
         except MikroTikError:
             # Incluye tanto la pérdida de conexión como cualquier error REST (p. ej.
             # HTTP 403): en ambos casos no se puede confirmar el estado.
@@ -92,7 +90,7 @@ class VlanController:
         self.current_mode = mode
         self.current_allows = active_allows
         self.status_known = True
-        return StatusSnapshot(mode=mode, active_allows=active_allows, legacy_allows=legacy, verified=True)
+        return StatusSnapshot(mode=mode, active_allows=active_allows, verified=True)
 
     def mark_status_unknown(self) -> None:
         self.status_known = False

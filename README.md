@@ -64,11 +64,10 @@ verificación de los cambios, sin tocar la política de firewall acordada.
   los botones y casillas se bloquean mientras se ejecuta la operación en
   segundo plano. Este bloqueo es solo local: no impide cambios simultáneos
   desde otra instancia de la aplicación o desde WinBox.
-- **Listas heredadas**: se detecta la presencia de `ALLOW_MICROSOFT` (nombre
-  anterior a `ALLOW_M365`) para la red gestionada y se informa en el registro;
-  no se convierte automáticamente en `ALLOW_M365` ni se borra ninguna otra
-  lista `ALLOW_*`. Existe una acción manual explícita, limitada al catálogo
-  heredado y a la red configurada, para eliminarla.
+- **Listas heredadas**: la aplicación **no** detecta ni gestiona
+  `ALLOW_MICROSOFT` (nombre anterior a `ALLOW_M365`) desde la interfaz; no
+  hay migración ni borrado automático. Ver "Mantenimiento: listas heredadas"
+  más abajo para la comprobación manual.
 - Corrección de la documentación de `MODE_RESTRICTED`: ya no incluye
   Microsoft 365, IA ni buscadores (ver tabla más abajo).
 
@@ -250,15 +249,26 @@ y comunica en el registro y en pantalla el estado observado. Si se pierde la
 conexión antes de poder verificar el resultado, se muestra "estado no
 verificado" y no se afirma éxito ni rollback.
 
-## Listas heredadas (`ALLOW_MICROSOFT`)
+## Mantenimiento: listas heredadas (`ALLOW_MICROSOFT`)
 
-El catálogo actual usa `ALLOW_M365`. Si el router conserva entradas antiguas
-con el nombre heredado `ALLOW_MICROSOFT` para la red gestionada, la
-aplicación las detecta al leer el estado y lo indica en el registro, pero
-**no las convierte automáticamente** en `ALLOW_M365` ni borra ninguna otra
-lista `ALLOW_*`. Existe un botón explícito ("Eliminar ALLOW_MICROSOFT
-heredada") que, tras confirmación, elimina únicamente las entradas de ese
-nombre heredado para la red configurada; no toca otras redes ni otras listas.
+El catálogo actual usa `ALLOW_M365`. La aplicación (interfaz Tkinter) **no**
+comprueba ni gestiona el nombre heredado `ALLOW_MICROSOFT`: no hay detección
+en pantalla, ni migración, ni borrado automático desde ningún botón.
+
+Si el router conserva entradas antiguas con ese nombre para la red
+gestionada, la comprobación y limpieza es una tarea de **mantenimiento
+manual**, fuera de la interfaz de esta aplicación:
+
+- Revisar `/ip firewall address-list` en WinBox o por REST, filtrando por
+  `list=ALLOW_MICROSOFT` y la red gestionada.
+- Si procede eliminarlas, hacerlo explícitamente y solo para esa red y ese
+  nombre heredado; no convertir automáticamente el permiso antiguo en
+  `ALLOW_M365` (revisar antes si esa red debe seguir teniendo ese permiso) ni
+  borrar otras listas `ALLOW_*` ni entradas de otras redes.
+
+`mikrotik_api.MikroTikRestClient` expone `get_legacy_allow_entries()` y
+`remove_legacy_allow_entries()` como utilidades de bajo nivel para scripts de
+mantenimiento puntuales; no se invocan automáticamente desde la aplicación.
 
 ## Concurrencia y bloqueo de operaciones
 
@@ -396,12 +406,11 @@ no es útil para manejar esta interfaz de forma interactiva.
 
 ### 7. Seleccionar `MODE_SELECTIVE`
 
-Pulsa **Actualizar estado** para consultar las listas `ALLOW_*` disponibles y
-detectar posibles entradas heredadas (`ALLOW_MICROSOFT`). Pulsa **Pasar a
-MODE_SELECTIVE** (con o sin casillas marcadas) para entrar en el modo; una vez
-dentro, marca o desmarca las casillas `ALLOW_*` una a una para activar o
-revocar cada permiso al instante, sin tener que volver a pulsar el botón de
-modo.
+Pulsa **Actualizar estado** para consultar las siete listas `ALLOW_*`
+disponibles. Pulsa **Pasar a MODE_SELECTIVE** (con o sin casillas marcadas)
+para entrar en el modo; una vez dentro, marca o desmarca las casillas
+`ALLOW_*` una a una para activar o revocar cada permiso al instante, sin
+tener que volver a pulsar el botón de modo.
 
 Para salir del modo selectivo, cambia a `MODE_EXAM`, `MODE_RESTRICTED` o
 `MODE_NORMAL`. Las entradas `ALLOW_*` de esa VLAN se eliminarán al cambiar de
@@ -440,8 +449,9 @@ Cobertura actual:
 - Activación y revocación de casillas `ALLOW_*`, verificación posterior y
   limpieza de conntrack solo tras un cambio efectivo.
 - Fallo de conntrack diferenciado del resultado del cambio de listas.
-- Detección de listas heredadas sin conversión automática, y limpieza
-  explícita limitada a la red gestionada.
+- Detección y limpieza de listas heredadas a nivel de `mikrotik_api.py`
+  (utilidad de mantenimiento, sin conversión automática y limitada a la red
+  gestionada); no forma parte de la interfaz de la aplicación.
 - Bloqueo de operaciones simultáneas sobre la misma instancia.
 
 Limitaciones conocidas de esta batería de pruebas (pendientes de validar
@@ -474,9 +484,12 @@ coincide con lo solicitado-, reintentos seguros ante timeouts en altas de
 recuperación de estado tras error que también cubre fallos HTTP (no solo
 pérdida de conexión), limpieza de conntrack solo tras un cambio efectivo y
 diferenciada de un fallo propio, bloqueo de operaciones simultáneas por
-instancia, detección explícita (sin conversión automática) de listas
-`ALLOW_MICROSOFT` heredadas, corrección de la documentación de
-`MODE_RESTRICTED`, y pruebas automatizadas con un backend REST simulado.
+instancia, corrección de la documentación de `MODE_RESTRICTED`, y pruebas
+automatizadas con un backend REST simulado. La interfaz mantiene únicamente
+los controles de modo y las siete casillas `ALLOW_*`; la comprobación de
+listas heredadas (`ALLOW_MICROSOFT`) queda documentada como tarea manual de
+mantenimiento (ver "Mantenimiento: listas heredadas"), sin botón, migración
+ni borrado automático en la aplicación.
 
 ### 1.3.0
 
