@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 
-from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
+from mikrotik_api import MikroTikError, MikroTikRestClient
 
 
 class OperationInProgressError(RuntimeError):
@@ -35,6 +35,7 @@ class ToggleResult:
     list_name: str
     changed: bool
     active: bool
+    fulfilled: bool
     active_allows: set[str]
     verified: bool
     conntrack_cleared: int | None = None
@@ -80,7 +81,9 @@ class VlanController:
                 self.client.get_optional_allows(self.network) if mode == "MODE_SELECTIVE" else set()
             )
             legacy = self.client.get_legacy_allow_entries(self.network)
-        except MikroTikConnectionError:
+        except MikroTikError:
+            # Incluye tanto la pérdida de conexión como cualquier error REST (p. ej.
+            # HTTP 403): en ambos casos no se puede confirmar el estado.
             self.status_known = False
             self.current_mode = None
             self.current_allows = set()
@@ -144,23 +147,35 @@ class VlanController:
         active_allows = self.client.get_optional_allows(self.network)
         self.current_allows = active_allows
         active = list_name in active_allows
+        fulfilled = active == want_enabled
 
         result = ToggleResult(
             list_name=list_name,
             changed=changed,
             active=active,
+            fulfilled=fulfilled,
             active_allows=active_allows,
             verified=True,
         )
 
-        # La limpieza de conntrack solo tiene sentido si hubo un cambio efectivo;
-        # es especialmente relevante al revocar un permiso. Un fallo aquí no debe
-        # revertir la lista ni anunciarse como si el corte de tráfico ya existente
-        # hubiera sido completamente efectivo.
-        if changed:
+        # La limpieza de conntrack solo tiene sentido si hubo un cambio efectivo Y
+        # el estado verificado coincide con lo pedido; es especialmente relevante
+        # al revocar un permiso. Un fallo de conntrack aquí no debe revertir la
+        # lista ni anunciarse como si el corte de tráfico ya existente hubiera sido
+        # completamente efectivo.
+        if changed and fulfilled:
             try:
                 result.conntrack_cleared = self.client.clear_connections_for_network(self.network)
             except MikroTikError as exc:
                 result.conntrack_error = str(exc)
+
+        if not fulfilled:
+            # Se conserva el estado realmente leído (current_allows ya actualizado)
+            # pero se comunica explícitamente que lo solicitado no se ha conseguido.
+            raise MikroTikError(
+                f"No se pudo confirmar el cambio de {list_name}: se pidió "
+                f"{'activar' if want_enabled else 'revocar'} pero el estado verificado en "
+                f"el router es {'activo' if active else 'inactivo'}."
+            )
 
         return result

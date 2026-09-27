@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 from dataclasses import dataclass
 
-from mikrotik_api import MikroTikConnectionError, MikroTikRestClient
+from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
 from vlan_controller import OperationInProgressError, StatusSnapshot, VlanController
 
 APP_VERSION = "1.3.1"
@@ -263,7 +263,11 @@ class VlanModeApp(tk.Tk):
         # Se intenta recuperar el estado real tras el error, cuando sea posible.
         try:
             snapshot = self.controller.refresh_status()
-        except MikroTikConnectionError:
+        except MikroTikError:
+            # Incluye tanto la pérdida de conexión como cualquier error REST (p. ej.
+            # HTTP 403) que impida confirmar el estado: en ambos casos no se puede
+            # verificar, así que se muestra como desconocido en vez de dejar visible
+            # un estado antiguo.
             self.after(
                 0,
                 lambda: self.append_log(

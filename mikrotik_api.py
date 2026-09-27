@@ -113,7 +113,15 @@ class MikroTikRestClient:
 
         try:
             self._request("PUT", "/ip/firewall/address-list", json=payload)
+        except MikroTikConnectionError:
+            # Resultado incierto: la petición pudo aplicarse en el router aunque
+            # se perdiera la respuesta. Se relee antes de decidir si repetir, para
+            # no crear una segunda entrada duplicada por un simple timeout.
+            if self.find_address_entries(list_name, address):
+                return True
+            raise
         except MikroTikError:
+            # Error propio del REST API (p. ej. PUT no soportado): reintento seguro.
             self._request("POST", "/ip/firewall/address-list/add", json=payload)
         return True
 
@@ -202,15 +210,17 @@ class MikroTikRestClient:
 
         Orden elegido (las peticiones REST no son una transacción atómica, cada
         paso puede fallar de forma independiente):
-        1. Se valida que no exista ya un conflicto de modos (pertenencia simultánea
+        1. Se validan los argumentos (listas ALLOW_* permitidas) antes de tocar
+           nada; una solicitud inválida se rechaza sin ninguna escritura.
+        2. Se valida que no exista ya un conflicto de modos (pertenencia simultánea
            a más de un modo especial) antes de tocar nada; ese conflicto inicial se
            reporta y aborta sin modificar entradas.
-        2. Si la red no tenía ninguna restricción activa (MODE_NORMAL), se añade
+        3. Si la red no tenía ninguna restricción activa (MODE_NORMAL), se añade
            MODE_EXAM como protección puente antes de cualquier otro cambio, para
            que nunca haya un intervalo sin restricción.
-        3. Se añade el modo/las listas ALLOW_* de destino y se verifica releyendo
+        4. Se añade el modo/las listas ALLOW_* de destino y se verifica releyendo
            el router.
-        4. Solo cuando el destino está confirmado se retiran las restricciones
+        5. Solo cuando el destino está confirmado se retiran las restricciones
            sobrantes (modo anterior y, si se usó, el puente MODE_EXAM).
         Si cualquier paso falla (incluida la pérdida de conexión), la restricción
         anterior (o el puente) permanece activa: no se amplían permisos por una
@@ -218,6 +228,13 @@ class MikroTikRestClient:
         """
         if target_mode not in SPECIAL_MODES:
             raise ValueError(f"Modo destino no soportado: {target_mode}")
+
+        selected: set[str] | None = None
+        if target_mode == "MODE_SELECTIVE":
+            selected = set(allow_lists or ())
+            invalid = selected.difference(OPTIONAL_ALLOW_LISTS)
+            if invalid:
+                raise ValueError(f"Listas ALLOW no permitidas: {', '.join(sorted(invalid))}")
 
         initial_modes = self._read_special_modes(network)
         if len(initial_modes) > 1:
@@ -233,11 +250,6 @@ class MikroTikRestClient:
             self.add_address_if_missing("MODE_EXAM", network, comment)
 
         if target_mode == "MODE_SELECTIVE":
-            selected = set(allow_lists or ())
-            invalid = selected.difference(OPTIONAL_ALLOW_LISTS)
-            if invalid:
-                raise ValueError(f"Listas ALLOW no permitidas: {', '.join(sorted(invalid))}")
-
             self.add_address_if_missing("MODE_SELECTIVE", network, comment)
 
             current_allows = self.get_optional_allows(network)

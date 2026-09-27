@@ -85,3 +85,52 @@ def test_read_failure_before_any_write_leaves_state_untouched():
 
     client.on_call = None
     assert client.get_vlan_mode(NETWORK) == "MODE_EXAM"
+
+
+def test_selective_validation_happens_before_any_write(client):
+    """Una solicitud con una lista ALLOW_* inválida se rechaza antes de leer o
+    escribir nada, incluso partiendo de MODE_NORMAL (sin puente MODE_EXAM)."""
+    calls_before = len(client.call_log)
+
+    with pytest.raises(ValueError):
+        client.set_mode_selective(NETWORK, allow_lists=("NOT_A_REAL_LIST",), comment="t")
+
+    assert len(client.call_log) == calls_before
+    assert client.get_vlan_mode(NETWORK) == "MODE_NORMAL"
+
+
+def test_add_address_survives_lost_response_without_duplicating(client):
+    """Si el router aplica el alta pero la respuesta se pierde (timeout), el
+    reintento no debe crear una segunda entrada duplicada."""
+
+    def hook(n, method, path, kwargs):
+        if method == "PUT" and path == "/ip/firewall/address-list":
+            payload = kwargs["json"]
+            client.entries.append({".id": "*99", **payload})
+            return connection_error()
+        return None
+
+    client.on_call = hook
+    added = client.add_address_if_missing("ALLOW_AI", NETWORK, comment="t")
+    client.on_call = None
+
+    assert added is True
+    matches = [e for e in client.entries if e["list"] == "ALLOW_AI" and e["address"] == NETWORK]
+    assert len(matches) == 1
+
+
+def test_add_address_propagates_uncertain_connection_error_without_retry(client):
+    """Si la escritura realmente no llegó a aplicarse y se pierde la conexión,
+    no se debe reintentar a ciegas: se propaga el error de conexión."""
+
+    def hook(n, method, path, kwargs):
+        if method == "PUT" and path == "/ip/firewall/address-list":
+            return connection_error()
+        return None
+
+    client.on_call = hook
+    with pytest.raises(MikroTikConnectionError):
+        client.add_address_if_missing("ALLOW_AI", NETWORK, comment="t")
+    client.on_call = None
+
+    assert client.get_optional_allows(NETWORK) == set()

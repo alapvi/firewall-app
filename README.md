@@ -32,10 +32,24 @@ verificación de los cambios, sin tocar la política de firewall acordada.
 - **`MODE_SELECTIVE`**: al aplicar una nueva selección de permisos opcionales,
   primero se retiran los que ya no están seleccionados y después se añaden los
   nuevos, para no ampliar el acceso antes de haber reducido el anterior.
+- **Validación de argumentos antes de cualquier escritura**: en `MODE_SELECTIVE`,
+  una lista `ALLOW_*` no reconocida se rechaza antes de leer o modificar
+  ninguna entrada (incluido el puente `MODE_EXAM`), no después.
 - **Casillas `ALLOW_*` verificadas de nuevo**: cada clic vuelve a comprobar que
   el modo sigue siendo `MODE_SELECTIVE`, aplica el cambio, relee el router y
   sincroniza la casilla con lo verificado (no con lo solicitado), también
-  cuando hay un error.
+  cuando hay un error. Si el estado verificado no coincide con lo pedido (por
+  ejemplo, otra fuente readd o retira la entrada mientras tanto), se conserva
+  el estado realmente leído y se informa explícitamente de que la operación
+  solicitada no se ha conseguido, en vez de darla por buena en silencio.
+- **Reintentos seguros ante timeouts**: al dar de alta una entrada, si se
+  pierde la respuesta de una escritura (error de conexión), la aplicación
+  relee antes de decidir si repetirla, para no crear una entrada duplicada por
+  un simple timeout cuando el router sí la había aplicado.
+- **Recuperación de estado tras error más robusta**: si tras un fallo la
+  relectura de verificación también falla (por pérdida de conexión o por un
+  error HTTP como 403), se muestra igualmente "estado no verificado" y se
+  deshabilitan las casillas, en vez de dejar visible un estado antiguo.
 - **Limpieza de conntrack tras un cambio efectivo**: solo se limpia cuando el
   permiso realmente cambió (especialmente al revocarlo) y nunca cuando no
   hubo ningún cambio. Un fallo de conntrack se informa por separado del
@@ -450,13 +464,18 @@ contra un MikroTik real):
 ### 1.3.1
 
 Transiciones protegidas entre modos (se añade el destino y se verifica antes
-de retirar la restricción anterior), comprobación de `SRC_GENERAL` antes de
-volver a `MODE_NORMAL`, reconciliación segura de las listas `ALLOW_*` en
+de retirar la restricción anterior), validación de las listas `ALLOW_*`
+solicitadas antes de cualquier escritura, comprobación de `SRC_GENERAL` antes
+de volver a `MODE_NORMAL`, reconciliación segura de las listas `ALLOW_*` en
 `MODE_SELECTIVE`, verificación y sincronización de las casillas tras cada
-cambio (incluidos los errores), limpieza de conntrack solo tras un cambio
-efectivo y diferenciada de un fallo propio, bloqueo de operaciones
-simultáneas por instancia, detección explícita (sin conversión automática)
-de listas `ALLOW_MICROSOFT` heredadas, corrección de la documentación de
+cambio -incluidos los errores y el caso en que el estado verificado no
+coincide con lo solicitado-, reintentos seguros ante timeouts en altas de
+`address-list` (releyendo antes de repetir, para no duplicar entradas),
+recuperación de estado tras error que también cubre fallos HTTP (no solo
+pérdida de conexión), limpieza de conntrack solo tras un cambio efectivo y
+diferenciada de un fallo propio, bloqueo de operaciones simultáneas por
+instancia, detección explícita (sin conversión automática) de listas
+`ALLOW_MICROSOFT` heredadas, corrección de la documentación de
 `MODE_RESTRICTED`, y pruebas automatizadas con un backend REST simulado.
 
 ### 1.3.0

@@ -100,3 +100,57 @@ def test_checkboxes_sync_with_read_state_not_requested_state(controller, selecti
     assert result.changed is False
     assert result.active is True
     assert controller.current_allows == {"ALLOW_SEARCH"}
+
+
+def test_toggle_raises_when_verified_state_does_not_match_request(controller, selective_client):
+    """Si tras revocar un permiso otra fuente (p. ej. WinBox) lo vuelve a añadir
+    antes de la relectura, el resultado no debe darse por bueno en silencio."""
+    controller.toggle_allow("ALLOW_AI", True)
+
+    def hook(n, method, path, kwargs):
+        if method == "DELETE" and path.startswith("/ip/firewall/address-list/"):
+            selective_client.entries.append(
+                {".id": "*999", "list": "ALLOW_AI", "address": NETWORK, "comment": "winbox", "disabled": "false"}
+            )
+        return None
+
+    selective_client.on_call = hook
+    with pytest.raises(MikroTikError, match="No se pudo confirmar"):
+        controller.toggle_allow("ALLOW_AI", False)
+    selective_client.on_call = None
+
+    # se conserva el estado realmente leído: sigue activo, pese a haberse pedido revocarlo
+    assert controller.current_allows == {"ALLOW_AI"}
+
+
+def test_toggle_skips_conntrack_when_request_not_fulfilled(controller, selective_client):
+    controller.toggle_allow("ALLOW_AI", True)
+    selective_client.connections.append({".id": "*c1", "src-address": "10.0.21.10:1"})
+
+    def hook(n, method, path, kwargs):
+        if method == "DELETE" and path.startswith("/ip/firewall/address-list/"):
+            selective_client.entries.append(
+                {".id": "*999", "list": "ALLOW_AI", "address": NETWORK, "comment": "winbox", "disabled": "false"}
+            )
+        return None
+
+    selective_client.on_call = hook
+    with pytest.raises(MikroTikError):
+        controller.toggle_allow("ALLOW_AI", False)
+    selective_client.on_call = None
+
+    # como la revocación no se confirmó, no se debe haber intentado limpiar conntrack
+    assert len(selective_client.connections) == 1
+
+
+def test_refresh_status_marks_unknown_on_any_mikrotik_error(controller, selective_client):
+    """La recuperación de estado debe tratar como no verificado cualquier error
+    REST (p. ej. HTTP 403), no solo la pérdida de conexión."""
+    calls_before = len(selective_client.call_log)
+    selective_client.fail_at(calls_before + 1, MikroTikError("HTTP 403 Forbidden"))
+
+    with pytest.raises(MikroTikError):
+        controller.refresh_status()
+
+    assert controller.status_known is False
+    assert controller.current_mode is None
