@@ -134,6 +134,10 @@ class VlanController:
                 "Los permisos ALLOW_* solo se pueden aplicar mientras la VLAN está en "
                 f"MODE_SELECTIVE (estado actual: {mode})."
             )
+        if list_name not in self.client.get_allow_list_names():
+            raise MikroTikError(
+                f"La lista {list_name} no tiene una regla forward accept activa."
+            )
 
         if want_enabled:
             changed = self.client.add_address_if_missing(list_name, self.network, comment=self.comment)

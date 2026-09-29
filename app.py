@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
 from vlan_controller import OperationInProgressError, StatusSnapshot, VlanController
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,16 @@ from urllib.parse import unquote
 
 from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
 
+DEFAULT_ALLOW_LISTS = {
+    "ALLOW_AI",
+    "ALLOW_SEARCH",
+    "ALLOW_M365",
+    "ALLOW_SIMARRO",
+    "ALLOW_ISOS",
+    "ALLOW_VIDEOGAME",
+    "ALLOW_FULL_INTERNET",
+}
+
 # Firma del hook de inyección de fallos: recibe el número de llamada (1-indexado),
 # el método HTTP, la ruta y los kwargs, y puede devolver una excepción a lanzar.
 OnCallHook = Callable[[int, str, str, dict], Optional[Exception]]
@@ -22,6 +32,7 @@ OnCallHook = Callable[[int, str, str, dict], Optional[Exception]]
 class FakeMikroTikRestClient(MikroTikRestClient):
     entries: list = field(default_factory=list)
     connections: list = field(default_factory=list)
+    filter_rules: list = field(default_factory=list)
 
     def __post_init__(self):
         self._next_id = 1
@@ -33,6 +44,16 @@ class FakeMikroTikRestClient(MikroTikRestClient):
         client = cls(host="fake-router", port=0, username="test", password="test")
         client.entries = [dict(e) for e in (entries or [])]
         client.connections = [dict(c) for c in (connections or [])]
+        client.filter_rules = [
+            {
+                ".id": f"*allow-{name}",
+                "chain": "forward",
+                "action": "accept",
+                "src-address-list": name,
+                "disabled": "false",
+            }
+            for name in DEFAULT_ALLOW_LISTS
+        ]
         ids = [e.get(".id") for e in client.entries if isinstance(e.get(".id"), str) and e[".id"].startswith("*")]
         numeric = [int(i[1:]) for i in ids if i[1:].isdigit()]
         client._next_id = (max(numeric) + 1) if numeric else 1
@@ -75,6 +96,9 @@ class FakeMikroTikRestClient(MikroTikRestClient):
 
         if method == "GET" and path == "/ip/firewall/address-list":
             return [dict(e) for e in self.entries]
+
+        if method == "GET" and path == "/ip/firewall/filter":
+            return [dict(rule) for rule in self.filter_rules]
 
         if method == "GET" and path == "/ip/firewall/connection":
             return [dict(c) for c in self.connections]

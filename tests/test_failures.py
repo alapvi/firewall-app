@@ -88,8 +88,8 @@ def test_read_failure_before_any_write_leaves_state_untouched():
 
 
 def test_selective_validation_happens_before_any_write(client):
-    """Una solicitud con una lista ALLOW_* inválida se rechaza antes de leer o
-    escribir nada, incluso partiendo de MODE_NORMAL (sin puente MODE_EXAM)."""
+    """Un nombre que no sigue el patrón se rechaza antes de cualquier petición,
+    incluso partiendo de MODE_NORMAL (sin puente MODE_EXAM)."""
     calls_before = len(client.call_log)
 
     with pytest.raises(ValueError):
