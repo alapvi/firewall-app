@@ -13,7 +13,16 @@ comprobarlo, `SRC_GENERAL`). Este documento describe el comportamiento de la
 aplicación; **no se ha validado contra las reglas reales del router**, que
 deben revisarse por separado en el MikroTik.
 
-## Versión 1.3.1
+## Versión 1.4.0
+
+- **Opciones `ALLOW_*` dinámicas**: `MODE_SELECTIVE` detecta las opciones a
+  partir de las reglas activas `forward` con acción `accept`; añadir una regla
+  compatible en MikroTik ya no requiere editar ni recompilar la aplicación.
+- **Limpieza de permisos residuales**: al cambiar de modo se retiran de la red
+  gestionada las membresías `ALLOW_*` huérfanas, incluso si su regla ya se
+  eliminó. `ALLOW_MICROSOFT` sigue excluida por ser un nombre heredado.
+
+### Cambios de la versión 1.3.1
 
 Esta versión corrige el orden de las transiciones entre modos y refuerza la
 verificación de los cambios, sin tocar la política de firewall acordada.
@@ -84,7 +93,39 @@ reglas `forward`. El acceso al propio CCR (`10.99.0.1`) se regula por reglas
 | `MODE_SELECTIVE` | Base de `MODE_EXAM` más las opciones `ALLOW_*` seleccionadas | `DROP` |
 | `MODE_NORMAL` | Política existente de `SRC_GENERAL`: Proxmox, red de servicios e Internet | Bloqueo de otras LAN internas según las reglas existentes |
 
-Catálogo selectivo (exacto, no se debe ampliar sin acordarlo primero):
+Las opciones selectivas se descubren en las reglas activas de `forward` con
+acción `accept` cuyo `src-address-list` siga el patrón `ALLOW_<nombre>` (solo
+letras ASCII, números, `_` y `-` después del prefijo). Para añadir una opción,
+crea su lista de origen y su regla compatible en el firewall; aparecerá al
+actualizar la app, sin cambiar ni recompilar su código. Se reserva el prefijo
+`ALLOW_` para estas opciones; al cambiar de modo también se limpian las
+membresías de ese patrón que queden huérfanas, para evitar permisos residuales.
+`ALLOW_MICROSOFT` continúa excluida por ser un nombre heredado.
+
+### Añadir una opción nueva en MikroTik
+
+1. Elige un nombre único, por ejemplo `ALLOW_NUEVO_SERVICIO`. Se admiten
+  letras ASCII, números, `_` y `-` después de `ALLOW_`; no uses el nombre
+  heredado `ALLOW_MICROSOFT`.
+2. En **IP > Firewall > Filter Rules**, crea una regla habilitada con
+  `chain=forward`, `action=accept` y `src-address-list=ALLOW_NUEVO_SERVICIO`.
+  Añade también la condición que limita el destino autorizado, por ejemplo
+  `dst-address-list=SERVICIO-URLs` o, para salida general a Internet,
+  `out-interface-list=WAN`.
+3. Coloca la regla en el punto correcto de la política: después de las reglas
+  para conexiones `established,related` y antes de la regla `DROP` que la
+  bloquearía. Comprueba que la regla no permite destinos más amplios de los
+  previstos.
+4. Pulsa **Actualizar estado** en la app. La nueva casilla aparecerá en
+  `MODE_SELECTIVE`; al activarla, la app añadirá la red gestionada a esa
+  `address-list`.
+
+La app detecta el nombre y los campos `chain`, `action` y `disabled`, pero no
+valida las condiciones de destino ni el orden de la regla. No añadas una regla
+`accept` sin restricciones de destino únicamente para que aparezca la opción:
+la política efectiva depende de la configuración completa del firewall.
+
+Opciones selectivas configuradas actualmente:
 
 | Lista de origen | Destino |
 | --- | --- |
@@ -349,14 +390,15 @@ Antes de ejecutar la aplicación, confirma que en el CCR están disponibles:
 - `www-ssl` activo en el puerto `7443`.
 - Reglas `input` permitiendo `SRC_TODAS_LAN -> 10.99.0.1:7443` (acceso al
   propio CCR, independiente de los modos `forward` descritos arriba).
-- Un usuario con permisos para modificar `/ip firewall address-list` y limpiar
-	`/ip firewall connection`.
+- Un usuario con permisos para leer `/ip firewall filter`, modificar
+  `/ip firewall address-list` y limpiar `/ip firewall connection`.
 - Las listas `MODE_EXAM`, `MODE_RESTRICTED`, `MODE_SELECTIVE`, `ALLOW_*` y
 	`SRC_GENERAL` usadas por las reglas `forward` del firewall, con la
 	semántica descrita en la tabla y el diagrama anteriores.
 
-Esta aplicación no valida por sí misma que esas reglas existan o tengan esa
-semántica en el router: solo gestiona la pertenencia a las listas.
+La aplicación detecta las reglas `forward accept` de origen `ALLOW_*`, pero no
+valida el destino ni la política completa que implementan: esa semántica debe
+revisarse en el MikroTik. La app solo gestiona la pertenencia a las listas.
 
 ### 6. Configurar la VLAN
 

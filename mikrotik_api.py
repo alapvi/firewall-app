@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -10,17 +11,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# RouterOS no tiene listas vacías: una address-list solo existe mediante sus entradas,
-# por eso el catálogo de listas opcionales se declara aquí en vez de descubrirse por API.
-OPTIONAL_ALLOW_LISTS = {
-    "ALLOW_AI",
-    "ALLOW_SEARCH",
-    "ALLOW_M365",
-    "ALLOW_SIMARRO",
-    "ALLOW_ISOS",
-    "ALLOW_VIDEOGAME",
-    "ALLOW_FULL_INTERNET",
-}
+ALLOW_LIST_NAME = re.compile(r"ALLOW_[A-Za-z0-9_-]+\Z")
 
 # Nombres heredados que el catálogo actual ya no usa (p. ej. renombrado a ALLOW_M365).
 # Se declaran de forma explícita: la app solo los detecta y documenta su migración,
@@ -164,7 +155,21 @@ class MikroTikRestClient:
         return "ERROR: VLAN fuera de SRC_GENERAL y sin modo asignado"
 
     def get_allow_list_names(self) -> set[str]:
-        return set(OPTIONAL_ALLOW_LISTS)
+        """Listas opcionales declaradas en reglas forward accept activas."""
+        rules = self._request("GET", "/ip/firewall/filter")
+        if not isinstance(rules, list):
+            return set()
+
+        return {
+            name
+            for rule in rules
+            if isinstance(rule, dict)
+            and rule.get("chain") == "forward"
+            and rule.get("action") == "accept"
+            and str(rule.get("disabled", "false")).lower() not in ("true", "yes")
+            and isinstance((name := rule.get("src-address-list")), str)
+            and ALLOW_LIST_NAME.fullmatch(name)
+        }
 
     def get_optional_allows(self, network: str) -> set[str]:
         entries = self.get_address_list_entries()
@@ -172,7 +177,8 @@ class MikroTikRestClient:
             entry["list"]
             for entry in entries
             if isinstance(entry.get("list"), str)
-            and entry["list"] in OPTIONAL_ALLOW_LISTS
+            and ALLOW_LIST_NAME.fullmatch(entry["list"])
+            and entry["list"] not in LEGACY_ALLOW_LISTS
             and entry.get("address") == network
             and str(entry.get("disabled", "false")).lower() not in ("true", "yes")
         }
@@ -197,7 +203,17 @@ class MikroTikRestClient:
         return sum(self.remove_address(name, network) for name in LEGACY_ALLOW_LISTS)
 
     def remove_optional_allows(self, network: str) -> int:
-        return sum(self.remove_address(list_name, network) for list_name in self.get_allow_list_names())
+        # Also clear orphaned ALLOW_* memberships whose firewall rule was removed,
+        # so recreating that rule later cannot restore an old permission.
+        names = {
+            entry["list"]
+            for entry in self.get_address_list_entries()
+            if isinstance(entry.get("list"), str)
+            and ALLOW_LIST_NAME.fullmatch(entry["list"])
+            and entry["list"] not in LEGACY_ALLOW_LISTS
+            and entry.get("address") == network
+        }
+        return sum(self.remove_address(name, network) for name in names)
 
     def _apply_restrictive_mode(
         self,
@@ -232,9 +248,12 @@ class MikroTikRestClient:
         selected: set[str] | None = None
         if target_mode == "MODE_SELECTIVE":
             selected = set(allow_lists or ())
-            invalid = selected.difference(OPTIONAL_ALLOW_LISTS)
+            malformed = {name for name in selected if not isinstance(name, str) or not ALLOW_LIST_NAME.fullmatch(name)}
+            if malformed:
+                raise ValueError(f"Nombres ALLOW no válidos: {', '.join(sorted(map(str, malformed)))}")
+            invalid = selected.difference(self.get_allow_list_names())
             if invalid:
-                raise ValueError(f"Listas ALLOW no permitidas: {', '.join(sorted(invalid))}")
+                raise ValueError(f"Listas ALLOW sin regla forward accept activa: {', '.join(sorted(invalid))}")
 
         initial_modes = self._read_special_modes(network)
         if len(initial_modes) > 1:
