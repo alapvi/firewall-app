@@ -12,16 +12,18 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from dataclasses import dataclass
+from datetime import datetime
 
 from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
 from vlan_controller import OperationInProgressError, StatusSnapshot, VlanController
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class VlanModeApp(tk.Tk):
         # espejo local de controller.current_mode: los checkbox ALLOW_* solo se
         # habilitan cuando vale "MODE_SELECTIVE" y el estado ha podido verificarse
         self.current_mode: str | None = None
+        self._busy = False
 
         self.title(f"MikroTik VLAN Modes v{APP_VERSION} - VLAN {config.vlan_id}")
         self.minsize(760, 480)
@@ -64,6 +67,7 @@ class VlanModeApp(tk.Tk):
         self._fit_to_screen()
 
         self._build_ui()
+        self.append_log(f"firewall-app v{APP_VERSION} | {__file__}")
         self.refresh_status()
 
     def _fit_to_screen(self) -> None:
@@ -94,6 +98,10 @@ class VlanModeApp(tk.Tk):
         status = tk.Label(self, textvariable=self.status_var, font=("Arial", 14, "bold"))
         status.pack(pady=(0, 12))
 
+        self.cleanup_var = tk.StringVar(value="Conexiones previas: no comprobadas en esta sesión")
+        self.cleanup_label = tk.Label(self, textvariable=self.cleanup_var, wraplength=720, fg="darkorange")
+        self.cleanup_label.pack(pady=(0, 6))
+
         frame = tk.Frame(self)
         frame.pack(pady=6)
 
@@ -102,6 +110,7 @@ class VlanModeApp(tk.Tk):
         self.restricted_btn = tk.Button(frame, text="Pasar a MODE_RESTRICTED", width=24, command=self.set_restricted)
         self.selective_btn = tk.Button(frame, text="Pasar a MODE_SELECTIVE", width=24, command=self.set_selective)
         self.normal_btn = tk.Button(frame, text="Pasar a MODE_NORMAL", width=22, command=self.set_normal)
+        self.cleanup_btn = tk.Button(frame, text="Reintentar limpieza de conexiones", command=self.retry_conntrack)
 
         allow_frame = tk.LabelFrame(self, text="Permisos opcionales para MODE_SELECTIVE")
         allow_frame.pack(fill="x", padx=14, pady=(2, 8))
@@ -113,14 +122,15 @@ class VlanModeApp(tk.Tk):
         self.refresh_btn.grid(row=0, column=0, padx=5, pady=5)
         self.exam_btn.grid(row=0, column=1, padx=5, pady=5)
         self.restricted_btn.grid(row=0, column=2, padx=5, pady=5)
-        self.selective_btn.grid(row=0, column=3, padx=5, pady=5)
-        self.normal_btn.grid(row=0, column=4, padx=5, pady=5)
+        self.selective_btn.grid(row=1, column=0, padx=5, pady=5)
+        self.normal_btn.grid(row=1, column=1, padx=5, pady=5)
+        self.cleanup_btn.grid(row=1, column=2, padx=5, pady=5)
 
         self.log = tk.Text(self, height=22, wrap="word")
         self.log.pack(fill="both", expand=True, padx=14, pady=14)
 
     def append_log(self, text: str) -> None:
-        self.log.insert("end", text + "\n")
+        self.log.insert("end", f"[{datetime.now().isoformat(timespec='seconds')}] {text}\n")
         self.log.see("end")
 
     def update_allow_vars(self, active_lists: set[str]) -> None:
@@ -131,7 +141,7 @@ class VlanModeApp(tk.Tk):
         for child in self.allow_frame.winfo_children():
             child.destroy()
 
-        allow_state = "normal" if self.current_mode == "MODE_SELECTIVE" else "disabled"
+        allow_state = "normal" if self.current_mode == "MODE_SELECTIVE" and not self._busy else "disabled"
         self.allow_vars = {}
         self.allow_checkbuttons = []
         for column, name in enumerate(sorted(available_lists)):
@@ -148,13 +158,16 @@ class VlanModeApp(tk.Tk):
             self.allow_checkbuttons.append(checkbutton)
 
     def set_buttons_enabled(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
+        self.refresh_btn.config(state="normal" if enabled else "disabled")
+        state = "normal" if enabled and self.current_mode in (
+            "MODE_NORMAL", "MODE_EXAM", "MODE_RESTRICTED", "MODE_SELECTIVE"
+        ) else "disabled"
         for btn in (
-            self.refresh_btn,
             self.exam_btn,
             self.restricted_btn,
             self.selective_btn,
             self.normal_btn,
+            self.cleanup_btn,
         ):
             btn.config(state=state)
 
@@ -166,7 +179,11 @@ class VlanModeApp(tk.Tk):
         # Estado no verificado: no se afirma éxito ni rollback, y las casillas
         # dejan de presentarse como confirmadas hasta la próxima lectura correcta.
         self.current_mode = None
+        self.controller.mark_status_unknown()
         self.status_var.set("Estado actual: DESCONOCIDO (no verificado)")
+        self.cleanup_var.set("Conexiones previas: limpieza no verificada")
+        self.cleanup_label.config(fg="red")
+        self.set_buttons_enabled(not self._busy)
         for checkbutton in self.allow_checkbuttons:
             checkbutton.config(state="disabled")
 
@@ -174,35 +191,29 @@ class VlanModeApp(tk.Tk):
         self.current_mode = snapshot.mode
         self.status_var.set(f"Estado actual: {snapshot.mode}")
         self.update_allow_vars(snapshot.active_allows)
-        allow_state = "normal" if snapshot.mode == "MODE_SELECTIVE" else "disabled"
+        allow_state = "normal" if snapshot.mode == "MODE_SELECTIVE" and not self._busy else "disabled"
         for checkbutton in self.allow_checkbuttons:
             checkbutton.config(state=allow_state)
 
-    def clear_connections_best_effort(self) -> None:
-        """
-        Intenta eliminar las conexiones activas de la VLAN.
-        Si falla, no invalida el cambio de modo realizado. Si el firewall acepta
-        conexiones ya establecidas antes de evaluar el modo/las listas, esta
-        limpieza es la única forma de forzar el corte de sesiones abiertas
-        previamente: las listas de address-list por sí solas no lo garantizan.
-        """
-        try:
-            removed = self.client.clear_connections_for_network(self.config.network)
-            self.after(
-                0,
-                lambda: self.append_log(
-                    f"Conexiones eliminadas de conntrack: {removed}"
-                ),
-            )
-        except Exception as exc:
-            error_message = str(exc)
-            self.after(
-                0,
-                lambda: self.append_log(
-                    "ADVERTENCIA: el modo se ha cambiado correctamente, "
-                    f"pero no se pudo limpiar conntrack: {error_message}"
-                ),
-            )
+    def _show_cleanup_result(self, result) -> None:
+        if result.conntrack_error:
+            message = "Listas verificadas, pero limpieza de conexiones INCOMPLETA o NO VERIFICADA. " + result.conntrack_error
+            self.cleanup_var.set(message)
+            self.cleanup_label.config(fg="red")
+            self.append_log(message)
+            messagebox.showwarning("Limpieza pendiente", message)
+        elif result.conntrack_cleared is not None:
+            message = f"Conexiones previas: {result.conntrack_cleared} ausentes tras verificar. Prueba de navegación pendiente."
+            self.cleanup_var.set(message)
+            self.cleanup_label.config(fg="darkgreen")
+            self.append_log(message)
+
+    def retry_conntrack(self) -> None:
+        def op():
+            result = self.controller.retry_conntrack()
+            self.after(0, lambda: self._apply_snapshot(StatusSnapshot(result.mode, result.active_allows, True)))
+            self.after(0, lambda: self._show_cleanup_result(result))
+        self.run_async("Reintentar limpieza (sin cambiar modo)", op)
 
     def run_async(self, label: str, func, on_busy=None) -> None:
         try:
@@ -213,16 +224,23 @@ class VlanModeApp(tk.Tk):
             messagebox.showwarning("Operación en curso", str(exc))
             return
 
+        self._busy = True
+        self.set_buttons_enabled(False)
+        self.append_log(f"=== {label} ===")
+
+        def finish():
+            self.controller.end_operation()
+            self._busy = False
+            self.set_buttons_enabled(True)
+
         def worker():
-            self.after(0, lambda: self.set_buttons_enabled(False))
-            self.after(0, lambda: self.append_log(f"\n=== {label} ==="))
             try:
                 func()
             except Exception as exc:
                 self._handle_failure(exc)
             finally:
-                self.controller.end_operation()
-                self.after(0, lambda: self.set_buttons_enabled(True))
+                # No liberar el lock hasta que Tk haya aplicado los resultados.
+                self.after(0, finish)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -244,8 +262,6 @@ class VlanModeApp(tk.Tk):
             self.after(0, lambda: messagebox.showerror("Sin conexión", error_message))
             return
 
-        self.after(0, lambda: messagebox.showerror("Error", error_message))
-
         # Se intenta recuperar el estado real tras el error, cuando sea posible.
         try:
             snapshot = self.controller.refresh_status()
@@ -261,9 +277,13 @@ class VlanModeApp(tk.Tk):
                 ),
             )
             self.after(0, self._show_unknown_state)
+            self.after(0, lambda: messagebox.showerror("Error", error_message))
             return
 
         self.after(0, lambda: self._apply_snapshot(snapshot))
+        self.after(0, lambda: self.cleanup_var.set("Operación incompleta: limpieza no verificada; revisa el estado y reintenta"))
+        self.after(0, lambda: self.cleanup_label.config(fg="red"))
+        self.after(0, lambda: messagebox.showerror("Error", error_message))
         self.after(0, lambda: self.append_log(f"Estado real confirmado tras el error: {snapshot.mode}"))
 
     def refresh_status(self) -> None:
@@ -302,20 +322,7 @@ class VlanModeApp(tk.Tk):
                 lambda: self.append_log(f"{list_name}: entrada {verb}. Estado verificado en el router."),
             )
 
-            if result.conntrack_error:
-                self.after(
-                    0,
-                    lambda: self.append_log(
-                        "ADVERTENCIA: el permiso se ha actualizado en las listas, pero no se pudo "
-                        f"limpiar conntrack: {result.conntrack_error}. Las conexiones ya existentes "
-                        "podrían seguir activas aunque la lista ya refleje el cambio."
-                    ),
-                )
-            elif result.conntrack_cleared is not None:
-                self.after(
-                    0,
-                    lambda: self.append_log(f"Conexiones eliminadas de conntrack: {result.conntrack_cleared}"),
-                )
+            self.after(0, lambda: self._show_cleanup_result(result))
 
         self.run_async(f"Actualizar {list_name}", op, on_busy=revert_checkbox)
 
@@ -327,6 +334,8 @@ class VlanModeApp(tk.Tk):
         )
 
     def apply_mode_change(self, target_mode: str, allow_lists: tuple[str, ...] = (), extra_success_lines=()) -> None:
+        self.after(0, lambda: self.cleanup_var.set("Aplicando modo y verificando conexiones previas..."))
+        self.after(0, lambda: self.cleanup_label.config(fg="darkorange"))
         result = self.controller.set_mode(target_mode, allow_lists=allow_lists)
 
         self.after(
@@ -339,14 +348,11 @@ class VlanModeApp(tk.Tk):
                 )
             ),
         )
-        self.after(0, lambda: self.append_log("Modo cambiado correctamente."))
-        self.after(0, lambda: self.append_log(f"Estado verificado: {result.mode}."))
+        self.after(0, lambda: self.append_log(f"Listas del modo verificadas: {result.mode}."))
         for line in extra_success_lines:
             self.after(0, lambda line=line: self.append_log(line))
 
-        # La limpieza de conntrack es una acción posterior best-effort: si falla no
-        # invalida el cambio de modo ya confirmado por la lectura anterior.
-        self.clear_connections_best_effort()
+        self.after(0, lambda: self._show_cleanup_result(result))
 
     def set_exam(self) -> None:
         if not self.confirm_mode_change("MODE_EXAM"):
@@ -395,6 +401,7 @@ class VlanModeApp(tk.Tk):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="App Tkinter para modos de VLAN en MikroTik CCR2216.")
+    parser.add_argument("--version", action="version", version=f"firewall-app {APP_VERSION}")
     parser.add_argument("--host", default="10.99.0.1")
     parser.add_argument("--port", type=int, default=7443)
     parser.add_argument("--user", required=True)
@@ -402,7 +409,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--network", required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--verify-ssl", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        network = ipaddress.ip_network(args.network, strict=True)
+        if network.version != 4 or network.prefixlen == 0:
+            raise ValueError("se requiere una IP/subred IPv4, distinta de 0.0.0.0/0")
+        # Conservar la forma original de la IP (/32 implícito): address-list usa
+        # coincidencia exacta con la configuración existente.
+        if not 1 <= args.port <= 65535:
+            raise ValueError("puerto fuera de rango")
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def main() -> int:
@@ -449,3 +467,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
