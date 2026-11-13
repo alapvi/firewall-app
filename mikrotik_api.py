@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
@@ -38,14 +39,29 @@ class MikroTikConnectionError(MikroTikError):
     afirmar éxito o fallo del cambio solicitado."""
 
 
+class MikroTikHTTPError(MikroTikError):
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class ConntrackCleanupError(MikroTikError):
+    """Las listas pueden estar aplicadas aunque la limpieza esté incompleta."""
+
+    def __init__(self, message: str, cleared: int = 0):
+        super().__init__(message)
+        self.cleared = cleared
+
+
 @dataclass
 class MikroTikRestClient:
     host: str
     port: int
     username: str
-    password: str
+    password: str = field(repr=False)
     verify_ssl: bool = False
     timeout: int = 10
+    _session: requests.Session | None = field(default=None, init=False, repr=False)
 
     @property
     def base_url(self) -> str:
@@ -53,8 +69,12 @@ class MikroTikRestClient:
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self.base_url}{path}"
+        if self._session is None:
+            self._session = requests.Session()
+            # El CCR es un destino interno; no heredar proxies del escritorio.
+            self._session.trust_env = False
         try:
-            response = requests.request(
+            response = self._session.request(
                 method,
                 url,
                 auth=(self.username, self.password),
@@ -67,18 +87,27 @@ class MikroTikRestClient:
 
         if not response.ok:
             body = response.text.strip()
-            raise MikroTikError(f"REST {method} {path} falló: HTTP {response.status_code} {body}")
+            raise MikroTikHTTPError(response.status_code, f"REST {method} {path} falló: HTTP {response.status_code} {body}")
 
         if response.text.strip():
             try:
                 return response.json()
-            except ValueError:
-                return response.text
+            except ValueError as exc:
+                raise MikroTikError(f"Respuesta JSON no válida en {method} {path}") from exc
         return None
+
+    @staticmethod
+    def _table(data: Any, path: str) -> list[dict[str, Any]]:
+        if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+            raise MikroTikError(f"Respuesta de tabla no válida en {path}; estado no verificado")
+        return data
 
     def get_address_list_entries(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/ip/firewall/address-list")
-        return data if isinstance(data, list) else []
+        entries = self._table(data, "/ip/firewall/address-list")
+        if any(not isinstance(e.get("list"), str) or not isinstance(e.get("address"), str) for e in entries):
+            raise MikroTikError("Address-list incompleta; no se puede verificar el modo")
+        return entries
 
     def find_address_entries(self, list_name: str, address: str) -> list[dict[str, Any]]:
         return [
@@ -111,9 +140,6 @@ class MikroTikRestClient:
             if self.find_address_entries(list_name, address):
                 return True
             raise
-        except MikroTikError:
-            # Error propio del REST API (p. ej. PUT no soportado): reintento seguro.
-            self._request("POST", "/ip/firewall/address-list/add", json=payload)
         return True
 
     def remove_address(self, list_name: str, address: str) -> int:
@@ -126,8 +152,15 @@ class MikroTikRestClient:
             safe_id = quote(entry_id, safe="*")
             try:
                 self._request("DELETE", f"/ip/firewall/address-list/{safe_id}")
-            except MikroTikError:
-                self._request("POST", "/ip/firewall/address-list/remove", json={".id": entry_id})
+            except MikroTikConnectionError:
+                # No repetir una escritura cuyo resultado se desconoce.
+                if any(e.get(".id") == entry_id for e in self.get_address_list_entries()):
+                    raise
+            except MikroTikHTTPError as exc:
+                if exc.status_code != 404:
+                    raise
+                if any(e.get(".id") == entry_id for e in self.get_address_list_entries()):
+                    raise
             removed += 1
         return removed
 
@@ -156,9 +189,7 @@ class MikroTikRestClient:
 
     def get_allow_list_names(self) -> set[str]:
         """Listas opcionales declaradas en reglas forward accept activas."""
-        rules = self._request("GET", "/ip/firewall/filter")
-        if not isinstance(rules, list):
-            return set()
+        rules = self._table(self._request("GET", "/ip/firewall/filter"), "/ip/firewall/filter")
 
         return {
             name
@@ -169,6 +200,7 @@ class MikroTikRestClient:
             and str(rule.get("disabled", "false")).lower() not in ("true", "yes")
             and isinstance((name := rule.get("src-address-list")), str)
             and ALLOW_LIST_NAME.fullmatch(name)
+            and name not in LEGACY_ALLOW_LISTS
         }
 
     def get_optional_allows(self, network: str) -> set[str]:
@@ -360,45 +392,98 @@ class MikroTikRestClient:
             raise MikroTikError("SRC_GENERAL ya no contiene la red tras la transición: estado inconsistente.")
 
     def get_connections(self) -> list[dict[str, Any]]:
-        data = self._request("GET", "/ip/firewall/connection")
-        return data if isinstance(data, list) else []
+        data = self._request("GET", "/ip/firewall/connection", params={
+            ".proplist": ".id,protocol,src-address,src-port,dst-address,dst-port,reply-src-address,reply-src-port,reply-dst-address,reply-dst-port"
+        })
+        return self._table(data, "/ip/firewall/connection")
 
     @staticmethod
     def _ip_part(value: str | None) -> str | None:
-        if not value:
+        if not isinstance(value, str) or not value:
             return None
-        return value.split(":", 1)[0]
-
-    def clear_connections_for_network(self, network: str) -> int:
-        net = ipaddress.ip_network(network, strict=False)
-        to_remove: list[str] = []
-
-        for conn in self.get_connections():
-            addresses = (
-                self._ip_part(conn.get("src-address")),
-                self._ip_part(conn.get("dst-address")),
-                self._ip_part(conn.get("reply-src-address")),
-                self._ip_part(conn.get("reply-dst-address")),
-            )
-
-            match = False
-            for ip_text in addresses:
-                if not ip_text:
-                    continue
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            host, separator, port = value.rpartition(":")
+            if separator and port.isdigit():
                 try:
-                    if ipaddress.ip_address(ip_text) in net:
-                        match = True
-                        break
+                    return str(ipaddress.ip_address(host.strip("[]")))
                 except ValueError:
-                    continue
+                    pass
+        return None
 
-            if match and conn.get(".id"):
-                to_remove.append(conn[".id"])
+    def _is_rest_connection(self, conn: dict[str, Any]) -> bool:
+        # No cortar las sesiones de control al ejecutar la app desde la propia VLAN.
+        # Solo se excluye TCP hacia el endpoint REST configurado, no la gestión entera.
+        if conn.get("protocol") not in ("tcp", "6", 6):
+            return False
+        value = conn.get("dst-address", "")
+        port = conn.get("dst-port")
+        if port is None and isinstance(value, str) and ":" in value:
+            port = value.rsplit(":", 1)[1]
+        return self._ip_part(value) == self.host and str(port) == str(self.port)
 
-        removed = 0
-        for entry_id in to_remove:
-            safe_id = quote(entry_id, safe="*")
-            self._request("DELETE", f"/ip/firewall/connection/{safe_id}")
-            removed += 1
+    def clear_connections_for_network(self, network: str, budget_seconds: float = 120) -> int:
+        """Borra y verifica la instantánea inicial, con dos intentos como máximo.
 
-        return removed
+        Una conexión que caduca durante DELETE no aborta las demás. Después de
+        cada pasada se relee: solo se repiten IDs que continúan perteneciendo a
+        la red. No se persigue una tabla vacía (DNS y tráfico permitido se recrean).
+        El contador incluye entradas de la instantánea que caducaron por sí solas.
+        Esto NO prueba que el firewall bloquee conexiones nuevas o recreadas.
+        """
+        net = ipaddress.ip_network(network, strict=True)
+        if net.version != 4 or net.prefixlen == 0:
+            raise ValueError("La red gestionada debe ser IPv4 y distinta de 0.0.0.0/0")
+        deadline = time.monotonic() + budget_seconds
+
+        def targets():
+            result = set()
+            for conn in self.get_connections():
+                if not conn.get(".id"):
+                    raise MikroTikError("Conntrack sin .id; no se puede verificar la limpieza")
+                addresses = [self._ip_part(conn.get(key)) for key in (
+                    "src-address", "dst-address", "reply-src-address", "reply-dst-address"
+                )]
+                if not any(addresses):
+                    raise MikroTikError("Conntrack sin direcciones válidas; no se puede verificar la limpieza")
+                if any(ip and ipaddress.ip_address(ip) in net for ip in addresses) and not self._is_rest_connection(conn):
+                    result.add(conn[".id"])
+            return result
+
+        initial = targets()
+        pending = initial.copy()
+        last_error = ""
+        for _ in range(2):
+            abort = False
+            for entry_id in sorted(pending):
+                if time.monotonic() >= deadline:
+                    last_error = "Límite de tiempo alcanzado"
+                    break
+                try:
+                    self._request("DELETE", f"/ip/firewall/connection/{quote(entry_id, safe='*')}")
+                except MikroTikError as exc:
+                    last_error = str(exc)
+                    # Una entrada caducada o un fallo aislado no detiene el resto.
+                    # Pérdida de red/permisos: releer, pero no insistir con escrituras.
+                    if isinstance(exc, MikroTikConnectionError) or (
+                        isinstance(exc, MikroTikHTTPError) and exc.status_code in (401, 403)
+                    ):
+                        abort = True
+                        break
+            try:
+                pending &= targets()
+            except MikroTikError as exc:
+                raise ConntrackCleanupError(
+                    f"No se pudo verificar conntrack: {exc}", len(initial) - len(pending)
+                ) from exc
+            if not pending:
+                return len(initial)
+            if abort or time.monotonic() >= deadline:
+                break
+
+        raise ConntrackCleanupError(
+            f"Limpieza incompleta: quedan {len(pending)} de {len(initial)} conexiones previas. {last_error}",
+            len(initial) - len(pending),
+        )
+

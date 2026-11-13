@@ -8,12 +8,52 @@ firewall, para moverla entre `MODE_NORMAL`, `MODE_EXAM`, `MODE_RESTRICTED` y
 La aplicación **no crea ni modifica reglas de firewall, listas de destino, la
 configuración DNS ni los permisos del router**. Únicamente añade o retira la
 red gestionada de listas de origen ya existentes (`MODE_EXAM`,
-`MODE_RESTRICTED`, `MODE_SELECTIVE`, las listas `ALLOW_*` y, para
-comprobarlo, `SRC_GENERAL`). Este documento describe el comportamiento de la
-aplicación; **no se ha validado contra las reglas reales del router**, que
-deben revisarse por separado en el MikroTik.
+`MODE_RESTRICTED`, `MODE_SELECTIVE` y las listas `ALLOW_*`); `SRC_GENERAL`
+solo se consulta. También limpia las conexiones previas de la red gestionada.
+Se ha revisado el listado de reglas aportado del CCR, pero **queda pendiente la
+validación de tráfico en el router real**, incluido su encaminamiento por hardware.
 
-## Versión 1.4.0
+## Versión 1.4.1 — preparación de EXAM/RESTRICTED
+
+La versión aparece en la ventana, en el registro inicial (junto con la ruta del
+archivo ejecutado) y mediante `python3 app.py --version`.
+
+- **Limpieza verificada**: después de verificar las listas del modo, se toma una
+  instantánea de conntrack y se comprueba que sus entradas ya no están presentes.
+  Un `404` por una conexión que caducó no abandona las demás. Los fallos aislados
+  se recorren y se permite una segunda pasada únicamente sobre IDs pendientes
+  tras releer. Hay un presupuesto de 120 s entre peticiones, más el tiempo de las
+  peticiones en curso/verificación; no es un límite absoluto de toda la operación.
+- **Sin éxito anticipado**: se muestran por separado el modo verificado y el
+  resultado de conntrack. Un resultado incompleto genera un aviso visible y
+  persistente. No se vuelve automáticamente a NORMAL.
+- **Reintento manual de limpieza**, sin cambiar listas, y nueva verificación del
+  modo después de limpiar. Volver a aplicar el mismo modo también limpia.
+- **Estado desconocido coherente** entre controlador e interfaz; con ese estado
+  las escrituras quedan deshabilitadas hasta actualizar correctamente.
+- **REST**: sesión HTTP reutilizada, sin proxies heredados del escritorio,
+  lectura de conntrack con `.proplist`, validación de respuestas y supresión de
+  los POST de escritura alternativos ante fallos PUT/DELETE. Un DELETE con
+  resultado incierto solo se considera resuelto si una relectura confirma la baja.
+- **Control de la app preservado**: se excluyen de la limpieza las conexiones TCP
+  cuyo destino original sea exactamente la IP y puerto REST configurados.
+  Esto no concede permisos de firewall ni excluye otras conexiones de la VLAN.
+- **UI**: bloqueo hasta aplicar los resultados en Tk, botones en dos filas y
+  registros con fecha/hora. Las opciones heredadas no reaparecen por discovery.
+
+**La verificación de conntrack no es una certificación del bloqueo de tráfico.**
+No se exige tabla vacía: las conexiones nuevas/permitidas pueden aparecer durante
+la limpieza. Las sesiones borradas pueden reconstruirse si las reglas lo permiten.
+El contador incluye conexiones de la instantánea que caducaron por sí mismas.
+El ámbito es IPv4; no se configuran reglas IPv6 ni se modifican FastTrack/L3HW.
+
+Antes de usar en exámenes, seguir [la revisión y prueba piloto](docs/VALIDACION_EXAMENES.md).
+Las pruebas automatizadas no sustituyen esa validación con el CCR real.
+El listado aportado tiene una aceptación general de `established,related` antes
+de los modos: corregir ese orden y comprobar L3HW es necesario además de actualizar
+la app. No hay una regla FastTrack en ese listado.
+
+### Cambios de la versión 1.4.0
 
 - **Opciones `ALLOW_*` dinámicas**: `MODE_SELECTIVE` detecta las opciones a
   partir de las reglas activas `forward` con acción `accept`; añadir una regla
@@ -86,7 +126,7 @@ La aplicación gestiona **solo pertenencia a listas de origen** usadas por las
 reglas `forward`. El acceso al propio CCR (`10.99.0.1`) se regula por reglas
 `input` independientes, fuera del alcance de esta aplicación.
 
-| Modo | Listas de destino permitidas (además de las ya establecidas) | Resto del tráfico |
+| Modo | Listas de destino previstas por la política | Resto del tráfico |
 | --- | --- | --- |
 | `MODE_EXAM` | DNS Conselleria (UDP/TCP 53), `idGVA-URLs`, `GVA-URLs` | `DROP` |
 | `MODE_RESTRICTED` | DNS Conselleria (UDP/TCP 53), `idGVA-URLs`, `GVA-URLs`, `Simarro-URLs` | `DROP` |
@@ -189,13 +229,16 @@ La aplicación solo añade o elimina la red gestionada de las listas
 ## Funcionamiento de los modos
 
 Las reglas `forward` de MikroTik consultan la lista de direcciones a la que
-pertenece la red gestionada. En todos los modos se aceptan primero las
-conexiones ya establecidas o relacionadas antes de evaluar el modo o las
-listas `ALLOW_*`; por eso, si ya había sesiones abiertas antes del cambio de
-modo, las listas por sí solas **no garantizan** el corte inmediato de esas
-sesiones existentes. La aplicación intenta limpiar esas conexiones
-(`conntrack`) como paso adicional, best-effort, tras cada cambio de modo y
-tras cada cambio efectivo de una casilla `ALLOW_*` (ver más abajo).
+pertenece la red gestionada. Si una aceptación general de `established,related`
+precede a las restricciones, las sesiones existentes pueden seguir funcionando.
+Con `loose-tcp-tracking=yes` pueden reconstruirse incluso después del borrado.
+La política del modo debe evaluarse antes de aceptaciones que la eludan, y hay
+que revisar FastTrack y L3HW. No basta con que las listas sean correctas.
+
+La app verifica la limpieza de una instantánea de conexiones después de cada
+cambio de modo y de cada cambio efectivo de un permiso ALLOW. Si falla, mantiene
+las listas aplicadas e informa de limpieza incompleta/no verificada. La prueba
+de tráfico bloqueado y permitido sigue siendo necesaria.
 
 El acceso al propio CCR (`10.99.0.1`) se rige por reglas `input`
 independientes de estos modos (que afectan al tráfico `forward`) y no se
@@ -513,6 +556,16 @@ contra un MikroTik real):
 
 ## Historial de versiones
 
+### 1.4.1
+
+Verificación de conntrack, manejo de entradas caducadas y fallos parciales,
+reintento de limpieza sin cambio de modo, estado desconocido coherente,
+REST sin escrituras alternativas a ciegas y pruebas de regresión de EXAM/RESTRICTED.
+
+### 1.4.0
+
+Descubrimiento dinámico de opciones ALLOW desde las reglas del router.
+
 ### 1.3.1
 
 Transiciones protegidas entre modos (se añade el destino y se verifica antes
@@ -557,3 +610,4 @@ aplicación.
 
 Primera versión con `MODE_SELECTIVE`, selección dinámica de listas `ALLOW_*`
 y sincronización de los permisos activos desde MikroTik.
+

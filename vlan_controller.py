@@ -9,9 +9,10 @@ y de despachar estas llamadas en un hilo de trabajo.
 from __future__ import annotations
 
 import threading
+import ipaddress
 from dataclasses import dataclass, field
 
-from mikrotik_api import MikroTikError, MikroTikRestClient
+from mikrotik_api import MikroTikConnectionError, MikroTikError, MikroTikRestClient
 
 
 class OperationInProgressError(RuntimeError):
@@ -46,6 +47,8 @@ class TransitionResult:
     mode: str
     active_allows: set[str] = field(default_factory=set)
     verified: bool = True
+    conntrack_cleared: int | None = None
+    conntrack_error: str | None = None
 
 
 class VlanController:
@@ -53,6 +56,9 @@ class VlanController:
     escritura de esta instancia mediante un lock no bloqueante."""
 
     def __init__(self, client: MikroTikRestClient, network: str, comment: str):
+        net = ipaddress.ip_network(network, strict=True)
+        if net.version != 4 or net.prefixlen == 0:
+            raise ValueError("Se requiere una red IPv4 concreta para gestionar esta instancia")
         self.client = client
         self.network = network
         self.comment = comment
@@ -99,6 +105,14 @@ class VlanController:
 
     # -- cambios de modo ------------------------------------------------------
     def set_mode(self, target_mode: str, allow_lists: tuple[str, ...] = ()) -> TransitionResult:
+        try:
+            self._set_mode_lists(target_mode, allow_lists)
+            return self.retry_conntrack(expected_mode=target_mode, expected_allows=self.current_allows.copy())
+        except Exception:
+            self.mark_status_unknown()
+            raise
+
+    def _set_mode_lists(self, target_mode: str, allow_lists: tuple[str, ...]) -> None:
         if target_mode == "MODE_NORMAL":
             self.client.set_mode_normal(self.network)
         elif target_mode == "MODE_EXAM":
@@ -123,10 +137,38 @@ class VlanController:
         active_allows = self.client.get_optional_allows(self.network) if mode == "MODE_SELECTIVE" else set()
         self.current_allows = active_allows
         self.status_known = True
-        return TransitionResult(mode=mode, active_allows=active_allows, verified=True)
+
+    def retry_conntrack(self, expected_mode: str | None = None, expected_allows: set[str] | None = None) -> TransitionResult:
+        """Reintenta solo la limpieza; nunca cambia de modo ni repone permisos."""
+        before = self.refresh_status()
+        if (expected_mode is not None and before.mode != expected_mode) or (
+            expected_allows is not None and before.active_allows != expected_allows
+        ):
+            raise MikroTikError("Las listas cambiaron antes de la limpieza; vuelve a actualizar el estado")
+        if before.mode not in ("MODE_NORMAL", "MODE_EXAM", "MODE_RESTRICTED", "MODE_SELECTIVE"):
+            raise MikroTikError("Resuelve el conflicto de modos antes de limpiar conexiones")
+        result = TransitionResult(mode=before.mode, active_allows=before.active_allows)
+        try:
+            result.conntrack_cleared = self.client.clear_connections_for_network(self.network)
+        except MikroTikError as exc:
+            result.conntrack_error = str(exc)
+            result.conntrack_cleared = getattr(exc, "cleared", None)
+        # El modo se verifica de nuevo tras la limpieza, incluso si esta falla.
+        # Si se perdió la conectividad, refresh_status invalida el estado y propaga.
+        after = self.refresh_status()
+        if after.mode != before.mode or after.active_allows != before.active_allows:
+            raise MikroTikError("Las listas cambiaron durante la limpieza; vuelve a actualizar el estado")
+        return result
 
     # -- casillas ALLOW_* en MODE_SELECTIVE -----------------------------------
     def toggle_allow(self, list_name: str, want_enabled: bool) -> ToggleResult:
+        try:
+            return self._toggle_allow(list_name, want_enabled)
+        except MikroTikConnectionError:
+            self.mark_status_unknown()
+            raise
+
+    def _toggle_allow(self, list_name: str, want_enabled: bool) -> ToggleResult:
         mode = self.client.get_vlan_mode(self.network)
         self.current_mode = mode
         if mode != "MODE_SELECTIVE":
@@ -170,6 +212,9 @@ class VlanController:
                 result.conntrack_cleared = self.client.clear_connections_for_network(self.network)
             except MikroTikError as exc:
                 result.conntrack_error = str(exc)
+            final = self.refresh_status()
+            if final.mode != "MODE_SELECTIVE" or final.active_allows != active_allows:
+                raise MikroTikError("Las listas cambiaron durante la limpieza; actualiza el estado")
 
         if not fulfilled:
             # Se conserva el estado realmente leído (current_allows ya actualizado)
@@ -181,3 +226,4 @@ class VlanController:
             )
 
         return result
+
