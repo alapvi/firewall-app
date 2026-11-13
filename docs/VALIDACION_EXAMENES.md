@@ -33,18 +33,20 @@ y conectividad del equipo ejecutor: esta actualización no repara una red caída
 
 La revisión del listado aportado el 13/11/2026 confirma:
 
-- La primera regla de `forward` acepta `established,related`, antes de los
+- En el listado inicial, la primera regla de `forward` aceptaba `established,related`, antes de los
   bloques EXAM, RESTRICTED y SELECTIVE. Una conexión ya aceptada no alcanza los
   DROP de esos modos. Con `loose-tcp-tracking=yes`, borrar conntrack tampoco
   garantiza impedir que un flujo TCP se reconstruya y vuelva a ser aceptado.
 - No aparece ninguna regla FastTrack en el filtro aportado; RAW está vacío.
   No atribuir este incidente a FastTrack sin nueva evidencia.
 - Hay interfaces VLAN de aulas con `l3-hw-offloading=yes` y bandera H, incluida
-  la VLAN 210 de la captura. Es necesario comprobar la configuración del chip,
-  los puertos y el recorrido hasta la salida: el listado no demuestra por sí
-  solo qué conexiones concretas se están encaminando por hardware.
-- `active-ipv6=no` en conntrack no demuestra que IPv6 esté deshabilitado en
-  todos los clientes ni sustituye la revisión de su política.
+  la VLAN 210 de la captura. El chip y los puertos internos tienen L3HW activo,
+  pero ambas WAN (`sfp28-11` y `sfp28-12`) lo tienen desactivado. Las rutas
+  aportadas salen por esos puertos: no atribuir la continuidad de navegación
+  por esas WAN a L3HW. Sigue pendiente revisar el tráfico entre VLANs internas.
+- IPv6 está habilitado (`disable-ipv6=no`, `forward=yes`). Esto no demuestra
+  que los clientes tengan salida IPv6: faltan direcciones, rutas, anuncios y
+  reglas IPv6. `active-ipv6=no` en conntrack no sustituye esa revisión.
 - SELECTIVE tiene permisos base para Search-URLs y Google-URLs, además de las
   reglas opcionales. Por tanto, desmarcar ALLOW_SEARCH no revoca necesariamente
   esos destinos. Esto requiere decidir y ajustar la política del CCR; no lo
@@ -52,7 +54,7 @@ La revisión del listado aportado el 13/11/2026 confirma:
 
 No se incluye el volcado completo de la red en este repositorio.
 
-### Orden propuesto para las reglas aportadas
+### Orden corregido y confirmado en el listado del CCR
 
 Mantener íntegros, en este orden, los bloques EXAM, RESTRICTED y SELECTIVE
 (cada uno con sus excepciones y su DROP final). Situar después la aceptación
@@ -61,22 +63,19 @@ Así, los paquetes originados por una VLAN restringida se evalúan incluso si
 pertenecen a una conexión establecida. Las respuestas desde destinos externos
 que no pertenezcan a esos modos alcanzan la aceptación de conexiones conocidas.
 
-El siguiente bloque es específico del listado revisado. Revisar que no haya
-cambiado, conservar acceso por gestión y activar Safe Mode antes de aplicarlo.
+El primer bloque de selección por `find` abortó sin cambios porque no obtuvo
+las coincidencias esperadas. Se retira de esta guía; no se ha determinado qué
+condición concreta falló. Con una impresión completa y reciente, el operador
+movió la regla 0 antes de la entonces regla 28. Esos números eran específicos
+de aquella impresión y no deben reutilizarse sobre otro estado del router.
+
+El listado posterior confirma EXAM en 0–4, RESTRICTED en 5–10, SELECTIVE en
+11–26, `established,related` en 27 y NORMAL en 28–31. Las reglas input de
+gestión permanecen en 32–33. El operador realizó el cambio en Safe Mode;
+todavía falta confirmar su conservación al salir y hacer la prueba de tráfico.
+
 El movimiento afecta a todas las VLAN que estén en modos especiales; no es un
 cambio exclusivo de la VLAN piloto. No lo ejecuta la app.
-
-```routeros
-{
-    :local established [/ip firewall filter find where chain="forward" and action="accept" and connection-state="established,related" and disabled=no]
-    :local normal [/ip firewall filter find where chain="forward" and comment="MODE_NORMAL | allow Proxmox from SRC_GENERAL" and disabled=no]
-    :if (([:len $established] != 1) or ([:len $normal] != 1)) do={
-        :error "No se cambia el orden: revisar reglas y anclas"
-    }
-    /ip firewall filter move $established destination=$normal
-}
-/ip firewall filter print detail without-paging
-```
 
 Verificar visualmente el orden y probar tráfico nuevo y previamente abierto.
 No cambiar `loose-tcp-tracking` globalmente para compensar el orden incorrecto.
@@ -84,10 +83,10 @@ No añadir un DROP aislado delante de las excepciones de Aules/identidad.
 
 ### Comprobación de L3HW
 
-Recoger primero `/interface ethernet switch print detail` y
-`/interface ethernet switch port print detail`. En las VLAN de examen debe
-garantizarse el paso por CPU/firewall. RouterOS permite controlar L3HW por VLAN;
-una prueba acotada, si la VLAN elegida es la 210 del listado, sería:
+Las salidas WAN aportadas ya tienen L3HW desactivado. Mantener ese ajuste.
+Para el aislamiento interno de las VLAN de examen debe garantizarse también
+el paso por CPU/firewall. RouterOS permite controlar L3HW por VLAN; si se
+decide probar el aislamiento interno con la VLAN 210, el cambio acotado sería:
 
 ```routeros
 /interface vlan set [find where name="VLAN-210" and vlan-id=210] l3-hw-offloading=no

@@ -49,9 +49,11 @@ El ámbito es IPv4; no se configuran reglas IPv6 ni se modifican FastTrack/L3HW.
 
 Antes de usar en exámenes, seguir [la revisión y prueba piloto](docs/VALIDACION_EXAMENES.md).
 Las pruebas automatizadas no sustituyen esa validación con el CCR real.
-El listado aportado tiene una aceptación general de `established,related` antes
-de los modos: corregir ese orden y comprobar L3HW es necesario además de actualizar
-la app. No hay una regla FastTrack en ese listado.
+El listado inicial tenía una aceptación general de `established,related` antes
+de los modos. El operador ya ha corregido el orden y aportado el listado posterior;
+queda pendiente validar el tráfico. Ambas WAN tienen L3HW desactivado; sigue
+pendiente comprobar el aislamiento interno y IPv6. No hay una regla FastTrack
+en el filtro aportado. Véase la guía para el estado de cada comprobación.
 
 ### Cambios de la versión 1.4.0
 
