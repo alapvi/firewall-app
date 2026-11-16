@@ -447,51 +447,69 @@ revisarse en el MikroTik. La app solo gestiona la pertenencia a las listas.
 
 ### 6. Configurar la VLAN y ejecutar el lanzador
 
-El lanzador genérico es `firewall-app.sh`. Sustituye al antiguo ejemplo
-`modo_salo.sh` y no tiene una VLAN de aula preconfigurada. Sin argumentos
-muestra la ayuda; no abre una sesión con una red elegida por defecto.
+El lanzador `firewall-app.sh` sustituye a `modo_salo.sh`. Se personaliza una
+sola vez por aula y después se abre sin argumentos, también desde un acceso
+directo. El ejemplo incluido corresponde a **VLAN 207 / 2SMXB**: antes de
+usarlo en otra aula, edita este bloque al principio del fichero:
+
+```bash
+CCR_HOST="10.99.0.1"          # IP o nombre del CCR, sin https://
+CCR_PORT="7443"              # Puerto HTTPS REST
+CCR_USER="firewall-app"      # Usuario de MikroTik
+VLAN_ID="207"               # Identificador mostrado en la app
+VLAN_NETWORK="10.20.7.0/24"  # Red exacta sobre la que se aplican los cambios
+VLAN_NAME="2SMXB"           # Nombre del aula
+VERIFY_SSL="false"          # true valida el certificado; false no lo verifica
+```
+
+Guarda el fichero y ejecútalo:
 
 ```bash
 chmod +x firewall-app.sh
+./firewall-app.sh
+```
+
+La contraseña se solicita en una ventana; no se guarda en el script.
+**El ámbito efectivo lo determina `VLAN_NETWORK`**. `VLAN_ID` no deduce ni
+comprueba la correspondencia entre VLAN y subred: revisa ambos valores juntos.
+
+Para consultar la ayuda y los valores guardados:
+
+```bash
 ./firewall-app.sh --help
 ```
 
-Ejemplo para 2SMXB (adaptar los valores a cada aula):
+Opcionalmente, puedes sobrescribir valores solo para una ejecución, sin editar
+el fichero. Los argumentos de la línea de comandos prevalecen sobre el bloque:
 
 ```bash
-./firewall-app.sh --host 10.99.0.1 --port 7443 --user firewall-app \
-  --vlan 207 --network 10.20.7.0/24 --name "2SMXB"
+./firewall-app.sh --vlan 213 --network 10.20.13.0/24 --name "ASIX"
 ```
 
-| Parámetro | Significado | Valor por defecto |
+| Parámetro | Significado | Valor si se omite en el lanzador |
 | --- | --- | --- |
-| `--host HOST` | IP o nombre del CCR, sin `https://` | `10.99.0.1` |
-| `--port PUERTO` | Puerto HTTPS de REST, entre 1 y 65535 | `7443` |
-| `--user USUARIO` | Usuario de MikroTik con los permisos indicados arriba | Obligatorio |
-| `--vlan ID` | Identificador mostrado en la ventana y comentarios | Obligatorio |
-| `--network RED` | IP o subred IPv4 exacta sobre la que se aplican los cambios | Obligatorio |
-| `--name "NOMBRE"` | Nombre descriptivo del aula | Obligatorio |
-| `--verify-ssl` | Activa la validación del certificado TLS con las CA de confianza | Desactivada |
+| `--host HOST` | IP o nombre del CCR, sin `https://` | `CCR_HOST` |
+| `--port PUERTO` | Puerto HTTPS REST entre 1 y 65535 | `CCR_PORT` |
+| `--user USUARIO` | Usuario con permisos REST para la app | `CCR_USER` |
+| `--vlan ID` | Identificador para ventana y comentarios | `VLAN_ID` |
+| `--network RED` | IP o subred IPv4 exacta gestionada | `VLAN_NETWORK` |
+| `--name "NOMBRE"` | Nombre descriptivo del aula | `VLAN_NAME` |
+| `--verify-ssl` | Activa la validación TLS con las CA de confianza | `VERIFY_SSL` |
 | `--version` | Muestra la versión de la app y termina | — |
-| `-h`, `--help` | Muestra la ayuda y termina | — |
+| `-h`, `--help` | Muestra ayuda y configuración guardada; no conecta | — |
 
-**El ámbito efectivo lo determina `--network`**. `--vlan` no deduce ni comprueba
-la correspondencia entre VLAN y subred. Revisa ambos valores antes de operar.
-La aplicación solicita la contraseña en una ventana; no se incluye en el script
-ni hay un parámetro de contraseña.
+Para desactivar la verificación TLS, cambia `VERIFY_SSL` a `false` en el bloque.
+El lanzador utiliza `.venv/bin/python` de su propia carpeta: no hace falta
+activar el entorno virtual y puede invocarse desde otra ubicación. La ayuda
+funciona sin dependencias; `--version` y el arranque requieren el entorno instalado.
 
-El lanzador utiliza directamente `.venv/bin/python` de su propia carpeta:
-no hace falta activar el entorno virtual y puede invocarse desde otra ubicación.
-La ayuda del lanzador funciona incluso antes de instalar las dependencias.
-`--version` y el arranque sí requieren el entorno instalado.
+En el acceso directo basta con la ruta absoluta de `firewall-app.sh`, sin
+parámetros. Si usabas `modo_salo.sh`, traslada sus valores personalizados al
+bloque del nuevo lanzador y actualiza la ruta del acceso directo. Antes de cada
+actualización, guarda ese bloque para no perder la configuración de tu aula.
 
-Para accesos directos, utiliza la ruta absoluta de `firewall-app.sh` seguida de
-los parámetros del aula. Al actualizar una instalación que usaba
-`modo_salo.sh`, conserva sus valores personalizados y trasládalos al acceso
-directo; cambia también la ruta del ejecutable. El nombre antiguo se elimina
-del repositorio.
-
-También se puede ejecutar Python directamente con los mismos parámetros:
+La ejecución directa de Python sigue requiriendo los parámetros del aula,
+porque no lee el bloque del lanzador:
 
 ```bash
 .venv/bin/python app.py --help
@@ -515,7 +533,7 @@ Opciones recomendadas:
 	ssh -X usuario@servidor
 	cd /opt/firewall-app/mikrotik_vlan_modes_tk_app
 	source .venv/bin/activate
-	./firewall-app.sh --user firewall-app --vlan 207 --network 10.20.7.0/24 --name "2SMXB"
+	./firewall-app.sh
 	```
 
 	El equipo cliente debe tener un servidor X instalado y el servidor SSH debe
@@ -594,8 +612,9 @@ contra un MikroTik real):
 
 ### Cambios posteriores a 1.4.1 (main; sin nueva etiqueta)
 
-Lanzador genérico `firewall-app.sh` en sustitución de `modo_salo.sh`, ayuda en
-castellano de todos los parámetros y ejemplos de instalación actualizados.
+Lanzador `firewall-app.sh` en sustitución de `modo_salo.sh`, con bloque de valores
+editables por aula y arranque sin argumentos. Ayuda en castellano, parámetros
+opcionales para sobrescribir valores y ejemplos de instalación actualizados.
 La lógica de los modos y conntrack conserva la versión 1.4.1. Para obtener este
 lanzador, descargar la rama `main`; el ZIP de la etiqueta `v1.4.1` conserva el
 contenido original de esa publicación.
