@@ -445,25 +445,59 @@ La aplicación detecta las reglas `forward accept` de origen `ALLOW_*`, pero no
 valida el destino ni la política completa que implementan: esa semántica debe
 revisarse en el MikroTik. La app solo gestiona la pertenencia a las listas.
 
-### 6. Configurar la VLAN
+### 6. Configurar la VLAN y ejecutar el lanzador
 
-El script `modo_salo.sh` ya viene preparado para la VLAN 21, red
-`10.0.21.0/24` y nombre `Saló de Actes`:
-
-```bash
-./modo_salo.sh
-```
-
-Si la VLAN es diferente, edita ese script o ejecuta la aplicación manualmente:
+El lanzador genérico es `firewall-app.sh`. Sustituye al antiguo ejemplo
+`modo_salo.sh` y no tiene una VLAN de aula preconfigurada. Sin argumentos
+muestra la ayuda; no abre una sesión con una red elegida por defecto.
 
 ```bash
-source .venv/bin/activate
-python app.py --host 10.99.0.1 --port 7443 --user firewall-app \
-	--vlan 21 --network 10.0.21.0/24 --name "Saló de Actes"
+chmod +x firewall-app.sh
+./firewall-app.sh --help
 ```
 
-La aplicación solicitará la contraseña de MikroTik en una ventana, no desde la
-línea de comandos.
+Ejemplo para 2SMXB (adaptar los valores a cada aula):
+
+```bash
+./firewall-app.sh --host 10.99.0.1 --port 7443 --user firewall-app \
+  --vlan 207 --network 10.20.7.0/24 --name "2SMXB"
+```
+
+| Parámetro | Significado | Valor por defecto |
+| --- | --- | --- |
+| `--host HOST` | IP o nombre del CCR, sin `https://` | `10.99.0.1` |
+| `--port PUERTO` | Puerto HTTPS de REST, entre 1 y 65535 | `7443` |
+| `--user USUARIO` | Usuario de MikroTik con los permisos indicados arriba | Obligatorio |
+| `--vlan ID` | Identificador mostrado en la ventana y comentarios | Obligatorio |
+| `--network RED` | IP o subred IPv4 exacta sobre la que se aplican los cambios | Obligatorio |
+| `--name "NOMBRE"` | Nombre descriptivo del aula | Obligatorio |
+| `--verify-ssl` | Activa la validación del certificado TLS con las CA de confianza | Desactivada |
+| `--version` | Muestra la versión de la app y termina | — |
+| `-h`, `--help` | Muestra la ayuda y termina | — |
+
+**El ámbito efectivo lo determina `--network`**. `--vlan` no deduce ni comprueba
+la correspondencia entre VLAN y subred. Revisa ambos valores antes de operar.
+La aplicación solicita la contraseña en una ventana; no se incluye en el script
+ni hay un parámetro de contraseña.
+
+El lanzador utiliza directamente `.venv/bin/python` de su propia carpeta:
+no hace falta activar el entorno virtual y puede invocarse desde otra ubicación.
+La ayuda del lanzador funciona incluso antes de instalar las dependencias.
+`--version` y el arranque sí requieren el entorno instalado.
+
+Para accesos directos, utiliza la ruta absoluta de `firewall-app.sh` seguida de
+los parámetros del aula. Al actualizar una instalación que usaba
+`modo_salo.sh`, conserva sus valores personalizados y trasládalos al acceso
+directo; cambia también la ruta del ejecutable. El nombre antiguo se elimina
+del repositorio.
+
+También se puede ejecutar Python directamente con los mismos parámetros:
+
+```bash
+.venv/bin/python app.py --help
+.venv/bin/python app.py --user firewall-app \
+  --vlan 207 --network 10.20.7.0/24 --name "2SMXB"
+```
 
 ### 6.1. Ejecutar desde un servidor sin escritorio
 
@@ -481,7 +515,7 @@ Opciones recomendadas:
 	ssh -X usuario@servidor
 	cd /opt/firewall-app/mikrotik_vlan_modes_tk_app
 	source .venv/bin/activate
-	./modo_salo.sh
+	./firewall-app.sh --user firewall-app --vlan 207 --network 10.20.7.0/24 --name "2SMXB"
 	```
 
 	El equipo cliente debe tener un servidor X instalado y el servidor SSH debe
@@ -557,6 +591,14 @@ contra un MikroTik real):
   solo local a cada instancia.
 
 ## Historial de versiones
+
+### Cambios posteriores a 1.4.1 (main; sin nueva etiqueta)
+
+Lanzador genérico `firewall-app.sh` en sustitución de `modo_salo.sh`, ayuda en
+castellano de todos los parámetros y ejemplos de instalación actualizados.
+La lógica de los modos y conntrack conserva la versión 1.4.1. Para obtener este
+lanzador, descargar la rama `main`; el ZIP de la etiqueta `v1.4.1` conserva el
+contenido original de esa publicación.
 
 ### 1.4.1
 

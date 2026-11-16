@@ -401,14 +401,14 @@ class VlanModeApp(tk.Tk):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="App Tkinter para modos de VLAN en MikroTik CCR2216.")
-    parser.add_argument("--version", action="version", version=f"firewall-app {APP_VERSION}")
-    parser.add_argument("--host", default="10.99.0.1")
-    parser.add_argument("--port", type=int, default=7443)
-    parser.add_argument("--user", required=True)
-    parser.add_argument("--vlan", required=True)
-    parser.add_argument("--network", required=True)
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--verify-ssl", action="store_true")
+    parser.add_argument("--version", action="version", version=f"firewall-app {APP_VERSION}", help="Muestra la versión y termina sin conectar al CCR.")
+    parser.add_argument("--host", default="10.99.0.1", help="IP o nombre del CCR, sin https:// (por defecto: 10.99.0.1).")
+    parser.add_argument("--port", type=int, default=7443, help="Puerto HTTPS REST entre 1 y 65535 (por defecto: 7443).")
+    parser.add_argument("--user", required=True, help="Usuario de MikroTik con permisos REST; la contraseña se pide en una ventana.")
+    parser.add_argument("--vlan", required=True, help="Identificador de VLAN para la ventana y comentarios; no deduce ni valida la red.")
+    parser.add_argument("--network", required=True, help="IP o subred IPv4 exacta que se gestionará en las address-list, por ejemplo 10.20.7.0/24.")
+    parser.add_argument("--name", required=True, help="Nombre descriptivo del aula; entre comillas si contiene espacios.")
+    parser.add_argument("--verify-ssl", action="store_true", help="Valida el certificado TLS del CCR con las CA de confianza; omitido: no se verifica.")
     args = parser.parse_args()
     try:
         network = ipaddress.ip_network(args.network, strict=True)
